@@ -36,8 +36,8 @@ const MONTH_MAP = {
 
 const sanitize = (s) => String(s || '')
   .toUpperCase()
-  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ') // unicode spaces → space
-  .replace(/[–—−]/g, '-')                                       // various dashes → -
+  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
+  .replace(/[–—−]/g, '-')
   .replace(/\s+/g, ' ')
   .trim();
 
@@ -46,12 +46,11 @@ const isYear = (t) => /^\d{4}$/.test(t);
 const isDay = (t) => /^\d{1,2}$/.test(t);
 const isTailFlag = (t) => /^(FUT|OPT|CE|PE)$/.test(t);
 
-/** Extract {und, mon, year, kind} from a broker symbol string */
 function parseSymbol(raw) {
   const u = sanitize(raw);
   const tokens = u.split(/[\s\-_/]+/).filter(Boolean);
 
-  // Build underlying: concat tokens until we hit month/year/flags. Drop a 1–31 day just before month.
+  // Underlying: concat tokens until month/year/flags (drop day before month)
   let undParts = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
@@ -63,22 +62,21 @@ function parseSymbol(raw) {
   }
   const und = undParts.join('').replace(/[^A-Z0-9]/g, '');
 
-  // Find month+year anywhere in the string (handles "30-Sep-2025", "Sep-2025", "Sep2025")
-  let mon=null, year=null;
-  let m;
+  // Month/Year anywhere (handles "30-Sep-2025", "Sep-2025", "Sep2025")
+  let mon=null, year=null, m;
   m = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
   if (m) { mon = MONTH_MAP[m[2]]; year = m[3]; }
   if (!mon) {
     m = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
     if (m) { mon = MONTH_MAP[m[1]]; year = m[2]; }
   }
-  // Kind: treat as OPT only if CE/PE is present explicitly, else FUT
-  const kind = /\b(CE|PE)\b/.test(u) ? 'OPT' : 'FUT';
 
+  // OPT only if CE/PE present; otherwise treat as FUT
+  const kind = /\b(CE|PE)\b/.test(u) ? 'OPT' : 'FUT';
   return { und, mon, year, kind };
 }
 
-/** Canonical key for equality checks. By default, IGNORE kind for batching. */
+/** Canonical key for equality checks. Ignore kind for batching. */
 function canonicalKey(raw, { includeKind = false } = {}) {
   const { und, mon, year, kind } = parseSymbol(raw);
   const base = (und && mon && year) ? `${und}-${mon}${year}` : sanitize(raw).replace(/[^A-Z0-9]/g, '');
@@ -107,7 +105,6 @@ export default function Orders() {
 
   const busyRef = useRef(false);
   const snapRef = useRef('');
-  theIntervalCleanupWarning: void 0; // avoids accidental shadowing
   const timerRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -152,23 +149,25 @@ export default function Orders() {
     };
   }, []);
 
+  /* ========= helpers ========= */
+  const rowKey = (row, idx) => `${row.name}-${row.symbol}-${row.order_id ?? row.status ?? idx}`;
+
   const toggle = (rowId) => setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
 
-  // ----- Cancel -----
+  /* ----- Cancel (state-based; no DOM) ----- */
   const cancelSelected = async () => {
-    const rows = document.querySelectorAll('#pending_table tbody tr');
     const selectedOrders = [];
-    rows.forEach((tr) => {
-      const rowId = tr.getAttribute('data-rowid');
-      if (selectedIds[rowId]) {
-        const tds = tr.querySelectorAll('td');
+    filtered.pending.forEach((row, idx) => {
+      const id = rowKey(row, idx);
+      if (selectedIds[id]) {
         selectedOrders.push({
-          name: tds[1]?.textContent.trim(),
-          symbol: tds[2]?.textContent.trim(),
-          order_id: tds[7]?.textContent.trim(),
+          name: row.name ?? '',
+          symbol: row.symbol ?? '',
+          order_id: row.order_id ?? '',
         });
       }
     });
+
     if (selectedOrders.length === 0) return alert('No orders selected.');
 
     try {
@@ -200,28 +199,25 @@ export default function Orders() {
 
   // OPEN MODIFY — allow multiple if canonical keys (without kind) are equal
   const openModify = () => {
-    const rows = document.querySelectorAll('#pending_table tbody tr');
     const chosen = [];
-    rows.forEach((tr) => {
-      const rowId = tr.getAttribute('data-rowid');
-      if (selectedIds[rowId]) {
-        const tds = tr.querySelectorAll('td');
+    filtered.pending.forEach((row, idx) => {
+      const id = rowKey(row, idx);
+      if (selectedIds[id]) {
         chosen.push({
-          name: tds[1]?.textContent.trim(),
-          symbol: tds[2]?.textContent.trim(),
-          price: tds[5]?.textContent.trim(),
-          order_id: tds[7]?.textContent.trim(),
+          name: row.name ?? '',
+          symbol: row.symbol ?? '',
+          price: row.price ?? '',
+          order_id: row.order_id ?? '',
         });
       }
     });
 
-    if (chosen.length === 0) return alert('Select at least one pending order to modify.');
+    if (chosen.length === 0) return alert('Select at least one order in Pending to modify.');
 
     const key0 = canonicalKey(chosen[0].symbol, { includeKind: false });
     const allSame = chosen.every((c) => canonicalKey(c.symbol, { includeKind: false }) === key0);
 
     if (!allSame) {
-      // Helpful debug so you can see what the app thinks each key is
       const diag = chosen.map((c) => `${c.symbol} → ${canonicalKey(c.symbol, { includeKind: false })}`).join('\n');
       alert('Please select orders with the SAME Symbol to batch modify.\n\n' + diag);
       return;
@@ -442,10 +438,10 @@ export default function Orders() {
         {rows.length === 0 ? (
           <tr><td colSpan={8} className="text-center">No data</td></tr>
         ) : rows.map((row, idx) => {
-          const rowId = `${row.name}-${row.symbol}-${row.order_id || row.status || idx}`;
+          const idKey = rowKey(row, idx);
           return (
-            <tr key={rowId} data-rowid={rowId}>
-              <td><input type="checkbox" checked={!!selectedIds[rowId]} onChange={() => toggle(rowId)} /></td>
+            <tr key={idKey} data-rowid={idKey}>
+              <td><input type="checkbox" checked={!!selectedIds[idKey]} onChange={() => toggle(idKey)} /></td>
               <td>{row.name ?? 'N/A'}</td>
               <td>{highlightSymbol(row.symbol)}</td>
               <td>{row.transaction_type ?? 'N/A'}</td>
