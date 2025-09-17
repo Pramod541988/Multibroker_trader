@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Table, Tabs, Tab, Badge, Modal, Form, Spinner, InputGroup } from 'react-bootstrap';
 import api from './api';
 
-/* === Inline icons (no extra deps) === */
+/* === tiny inline icons (no extra deps) === */
 const SearchIcon = (props) => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
@@ -36,8 +36,8 @@ const MONTH_MAP = {
 
 const sanitize = (s) => String(s || '')
   .toUpperCase()
-  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
-  .replace(/[–—−]/g, '-')
+  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ') // exotic spaces -> space
+  .replace(/[–—−]/g, '-')                                       // various dashes -> -
   .replace(/\s+/g, ' ')
   .trim();
 
@@ -46,12 +46,13 @@ const isYear = (t) => /^\d{4}$/.test(t);
 const isDay = (t) => /^\d{1,2}$/.test(t);
 const isTailFlag = (t) => /^(FUT|OPT|CE|PE)$/.test(t);
 
+/** Extract {und, mon, year, kind} from a broker symbol string */
 function parseSymbol(raw) {
   const u = sanitize(raw);
   const tokens = u.split(/[\s\-_/]+/).filter(Boolean);
 
-  // Underlying: concat tokens until month/year/flags (drop day before month)
-  let undParts = [];
+  // Build underlying until month/year/flags (drop a day just before a month)
+  const undParts = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (isTailFlag(t) || isYear(t) || isMonthHead(t)) {
@@ -62,8 +63,8 @@ function parseSymbol(raw) {
   }
   const und = undParts.join('').replace(/[^A-Z0-9]/g, '');
 
-  // Month/Year anywhere (handles "30-Sep-2025", "Sep-2025", "Sep2025")
-  let mon=null, year=null, m;
+  // Find month+year anywhere (handles "30-Sep-2025", "Sep-2025", "Sep2025")
+  let mon = null, year = null, m;
   m = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
   if (m) { mon = MONTH_MAP[m[2]]; year = m[3]; }
   if (!mon) {
@@ -71,12 +72,11 @@ function parseSymbol(raw) {
     if (m) { mon = MONTH_MAP[m[1]]; year = m[2]; }
   }
 
-  // OPT only if CE/PE present; otherwise treat as FUT
   const kind = /\b(CE|PE)\b/.test(u) ? 'OPT' : 'FUT';
   return { und, mon, year, kind };
 }
 
-/** Canonical key for equality checks. Ignore kind for batching. */
+/** Canonical key for equality checks. By default, IGNORE kind for batching. */
 function canonicalKey(raw, { includeKind = false } = {}) {
   const { und, mon, year, kind } = parseSymbol(raw);
   const base = (und && mon && year) ? `${und}-${mon}${year}` : sanitize(raw).replace(/[^A-Z0-9]/g, '');
@@ -150,24 +150,36 @@ export default function Orders() {
   }, []);
 
   /* ========= helpers ========= */
-  const rowKey = (row, idx) => `${row.name}-${row.symbol}-${row.order_id ?? row.status ?? idx}`;
 
-  const toggle = (rowId) => setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
+  // stable row id (doesn't depend on index/search)
+  const rowKey = (row) => String(row.order_id ?? `${row.name ?? ''}|${row.symbol ?? ''}|${row.status ?? ''}`);
 
-  /* ----- Cancel (state-based; no DOM) ----- */
-  const cancelSelected = async () => {
-    const selectedOrders = [];
-    filtered.pending.forEach((row, idx) => {
-      const id = rowKey(row, idx);
+  const toggle = (rowId) =>
+    setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
+
+  // Read selected rows directly from state (not the DOM / not filtered view)
+  const getSelectedPending = () => {
+    const picked = [];
+    orders.pending.forEach((row) => {
+      const id = rowKey(row);
       if (selectedIds[id]) {
-        selectedOrders.push({
+        picked.push({
           name: row.name ?? '',
           symbol: row.symbol ?? '',
+          price: row.price ?? '',
           order_id: row.order_id ?? '',
+          status: row.status ?? '',
         });
       }
     });
+    return picked;
+  };
 
+  /* ----- Cancel (state-based) ----- */
+  const cancelSelected = async () => {
+    const selectedOrders = getSelectedPending().map((o) => ({
+      name: o.name, symbol: o.symbol, order_id: o.order_id,
+    }));
     if (selectedOrders.length === 0) return alert('No orders selected.');
 
     try {
@@ -191,7 +203,7 @@ export default function Orders() {
 
   const tryFetchLTP = async (symbol) => {
     try {
-      const r = await api.get('/ltp', { params: { symbol } });
+      const r = await api.get('/ltp', { params: { symbol } }); // optional; 404 ok
       const v = Number(r?.data?.ltp);
       if (!Number.isNaN(v)) setModLTP(v.toFixed(2));
     } catch { /* ignore */ }
@@ -199,19 +211,7 @@ export default function Orders() {
 
   // OPEN MODIFY — allow multiple if canonical keys (without kind) are equal
   const openModify = () => {
-    const chosen = [];
-    filtered.pending.forEach((row, idx) => {
-      const id = rowKey(row, idx);
-      if (selectedIds[id]) {
-        chosen.push({
-          name: row.name ?? '',
-          symbol: row.symbol ?? '',
-          price: row.price ?? '',
-          order_id: row.order_id ?? '',
-        });
-      }
-    });
-
+    const chosen = getSelectedPending();
     if (chosen.length === 0) return alert('Select at least one order in Pending to modify.');
 
     const key0 = canonicalKey(chosen[0].symbol, { includeKind: false });
@@ -437,8 +437,8 @@ export default function Orders() {
       <tbody>
         {rows.length === 0 ? (
           <tr><td colSpan={8} className="text-center">No data</td></tr>
-        ) : rows.map((row, idx) => {
-          const idKey = rowKey(row, idx);
+        ) : rows.map((row) => {
+          const idKey = rowKey(row);
           return (
             <tr key={idKey} data-rowid={idKey}>
               <td><input type="checkbox" checked={!!selectedIds[idKey]} onChange={() => toggle(idKey)} /></td>
