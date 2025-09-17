@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Table, Tabs, Tab, Badge, Modal, Form, Spinner, InputGroup } from 'react-bootstrap';
 import api from './api';
 
-/* === tiny inline icons (no extra deps) === */
+/* == tiny inline icons (no extra deps) == */
 const SearchIcon = (props) => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
@@ -19,7 +19,7 @@ const XCircle = (props) => (
 
 const AUTO_REFRESH_MS = 3000;
 
-/* map display to canonical order types */
+/* display -> canonical order type */
 const DISPLAY_TO_CANON = {
   NO_CHANGE: 'NO_CHANGE',
   LIMIT: 'LIMIT',
@@ -30,28 +30,24 @@ const DISPLAY_TO_CANON = {
 
 /* ---------- Broker-agnostic symbol parsing ---------- */
 const MONTH_MAP = {
-  JAN: 'JAN', FEB: 'FEB', MAR: 'MAR', APR: 'APR', MAY: 'MAY', JUN: 'JUN',
-  JUL: 'JUL', AUG: 'AUG', SEP: 'SEP', SEPT: 'SEP', OCT: 'OCT', NOV: 'NOV', DEC: 'DEC'
+  JAN:'JAN', FEB:'FEB', MAR:'MAR', APR:'APR', MAY:'MAY', JUN:'JUN',
+  JUL:'JUL', AUG:'AUG', SEP:'SEP', SEPT:'SEP', OCT:'OCT', NOV:'NOV', DEC:'DEC'
 };
-
 const sanitize = (s) => String(s || '')
   .toUpperCase()
-  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ') // exotic spaces -> space
-  .replace(/[–—−]/g, '-')                                       // various dashes -> -
+  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
+  .replace(/[–—−]/g, '-')
   .replace(/\s+/g, ' ')
   .trim();
-
 const isMonthHead = (t) => /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)/.test(t);
 const isYear = (t) => /^\d{4}$/.test(t);
 const isDay = (t) => /^\d{1,2}$/.test(t);
 const isTailFlag = (t) => /^(FUT|OPT|CE|PE)$/.test(t);
 
-/** Extract {und, mon, year, kind} from a broker symbol string */
 function parseSymbol(raw) {
   const u = sanitize(raw);
   const tokens = u.split(/[\s\-_/]+/).filter(Boolean);
 
-  // Build underlying until month/year/flags (drop a day just before a month)
   const undParts = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
@@ -63,8 +59,7 @@ function parseSymbol(raw) {
   }
   const und = undParts.join('').replace(/[^A-Z0-9]/g, '');
 
-  // Find month+year anywhere (handles "30-Sep-2025", "Sep-2025", "Sep2025")
-  let mon = null, year = null, m;
+  let mon=null, year=null, m;
   m = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
   if (m) { mon = MONTH_MAP[m[2]]; year = m[3]; }
   if (!mon) {
@@ -75,8 +70,6 @@ function parseSymbol(raw) {
   const kind = /\b(CE|PE)\b/.test(u) ? 'OPT' : 'FUT';
   return { und, mon, year, kind };
 }
-
-/** Canonical key for equality checks. By default, IGNORE kind for batching. */
 function canonicalKey(raw, { includeKind = false } = {}) {
   const { und, mon, year, kind } = parseSymbol(raw);
   const base = (und && mon && year) ? `${und}-${mon}${year}` : sanitize(raw).replace(/[^A-Z0-9]/g, '');
@@ -93,9 +86,9 @@ export default function Orders() {
   const [query, setQuery] = useState('');
   const qTokens = useMemo(() => query.trim().split(/\s+/).filter(Boolean), [query]);
 
-  // modify modal (batch-aware)
+  // modify modal
   const [showModify, setShowModify] = useState(false);
-  const [modifyTarget, setModifyTarget] = useState(null); // {symbol, key, orders:[{name,symbol,price,order_id}]}
+  const [modifyTarget, setModifyTarget] = useState(null); // {symbol, key, orders:[...]}
   const [modQty, setModQty] = useState('');
   const [modPrice, setModPrice] = useState('');
   const [modTrig, setModTrig] = useState('');
@@ -107,6 +100,18 @@ export default function Orders() {
   const snapRef = useRef('');
   const timerRef = useRef(null);
   const abortRef = useRef(null);
+
+  // dedicated modal container to avoid portal issues
+  const modalContainerRef = useRef(null);
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      const el = document.createElement('div');
+      el.id = 'orders-modal-root';
+      document.body.appendChild(el);
+      modalContainerRef.current = el;
+      return () => { try { document.body.removeChild(el); } catch {} };
+    }
+  }, []);
 
   const fetchAll = async () => {
     if (busyRef.current) return;
@@ -150,14 +155,11 @@ export default function Orders() {
   }, []);
 
   /* ========= helpers ========= */
-
-  // stable row id (doesn't depend on index/search)
   const rowKey = (row) => String(row.order_id ?? `${row.name ?? ''}|${row.symbol ?? ''}|${row.status ?? ''}`);
 
-  const toggle = (rowId) =>
-    setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
+  const toggle = (rowId) => setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
 
-  // Read selected rows directly from state (not the DOM / not filtered view)
+  // always read from full pending list (not filtered / not DOM)
   const getSelectedPending = () => {
     const picked = [];
     orders.pending.forEach((row) => {
@@ -175,7 +177,7 @@ export default function Orders() {
     return picked;
   };
 
-  /* ----- Cancel (state-based) ----- */
+  /* ----- Cancel ----- */
   const cancelSelected = async () => {
     const selectedOrders = getSelectedPending().map((o) => ({
       name: o.name, symbol: o.symbol, order_id: o.order_id,
@@ -195,7 +197,7 @@ export default function Orders() {
     }
   };
 
-  // ----- Modify helpers -----
+  /* ----- Modify ----- */
   const requires = (displayType) => {
     const canon = DISPLAY_TO_CANON[displayType] || displayType;
     return { price: ['LIMIT', 'STOPLOSS'].includes(canon), trig: ['STOPLOSS', 'STOPLOSS_MARKET'].includes(canon), canon };
@@ -203,22 +205,21 @@ export default function Orders() {
 
   const tryFetchLTP = async (symbol) => {
     try {
-      const r = await api.get('/ltp', { params: { symbol } }); // optional; 404 ok
+      const r = await api.get('/ltp', { params: { symbol } });
       const v = Number(r?.data?.ltp);
       if (!Number.isNaN(v)) setModLTP(v.toFixed(2));
-    } catch { /* ignore */ }
+    } catch { /* ignore 404 etc. */ }
   };
 
-  // OPEN MODIFY — allow multiple if canonical keys (without kind) are equal
   const openModify = () => {
     const chosen = getSelectedPending();
-    if (chosen.length === 0) return alert('Select at least one order in Pending to modify.');
+    if (chosen.length === 0) { alert('Select at least one order in Pending to modify.'); return; }
 
     const key0 = canonicalKey(chosen[0].symbol, { includeKind: false });
     const allSame = chosen.every((c) => canonicalKey(c.symbol, { includeKind: false }) === key0);
 
     if (!allSame) {
-      const diag = chosen.map((c) => `${c.symbol} → ${canonicalKey(c.symbol, { includeKind: false })}`).join('\n');
+      const diag = chosen.map((c) => `${c.symbol} → ${canonicalKey(c.symbol, { includeKind:false })}`).join('\n');
       alert('Please select orders with the SAME Symbol to batch modify.\n\n' + diag);
       return;
     }
@@ -234,7 +235,6 @@ export default function Orders() {
     if (chosen[0].symbol) tryFetchLTP(chosen[0].symbol);
   };
 
-  // SUBMIT MODIFY — applies same change to all selected orders
   const submitModify = async () => {
     if (!modifyTarget) return;
     const need = requires(modType);
@@ -336,7 +336,14 @@ export default function Orders() {
     const isBatch = modifyTarget.orders?.length > 1;
 
     return (
-      <Modal show={showModify} onHide={() => setShowModify(false)} backdrop="static" centered contentClassName="blueTone modalCardPad">
+      <Modal
+        container={modalContainerRef.current || undefined}
+        show={showModify}
+        onHide={() => setShowModify(false)}
+        backdrop="static"
+        centered
+        contentClassName="blueTone modalCardPad"
+      >
         <Modal.Header closeButton>
           <Modal.Title>{isBatch ? 'Modify Orders (Batch)' : 'Modify Order'}</Modal.Title>
         </Modal.Header>
@@ -464,6 +471,9 @@ export default function Orders() {
         <Button variant="warning" onClick={openModify}>Modify Order</Button>
         <Button variant="danger" onClick={cancelSelected}>Cancel Order</Button>
 
+        {/* Live selection count for quick sanity check */}
+        <Badge bg="info" className="ms-1">{Object.values(selectedIds).filter(Boolean).length} selected</Badge>
+
         {/* Search by Symbol */}
         <div className="ms-auto">
           <InputGroup className="searchGroup">
@@ -503,6 +513,8 @@ export default function Orders() {
         .searchGroup .btn { border-color: #cfe2ff; }
         mark.hl { background: #fff3cd; padding: 0 2px; border-radius: 2px; }
       `}</style>
+
+      {renderModifyModal()}
     </Card>
   );
 }
