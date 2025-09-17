@@ -19,7 +19,7 @@ const XCircle = (props) => (
 
 const AUTO_REFRESH_MS = 3000;
 
-/* maps display to canonical order types */
+/* map display to canonical order types */
 const DISPLAY_TO_CANON = {
   NO_CHANGE: 'NO_CHANGE',
   LIMIT: 'LIMIT',
@@ -29,31 +29,23 @@ const DISPLAY_TO_CANON = {
 };
 
 /* ---------- Broker-agnostic symbol normalizer ---------- */
-/* Goal: produce same key for "TITAN-Sep2025-FUT" and "TITAN 30-Sep-2025" => "TITAN-SEP2025-FUT". */
 const MONTH_MAP = {
   JAN: 'JAN', FEB: 'FEB', MAR: 'MAR', APR: 'APR', MAY: 'MAY', JUN: 'JUN',
   JUL: 'JUL', AUG: 'AUG', SEP: 'SEP', SEPT: 'SEP', OCT: 'OCT', NOV: 'NOV', DEC: 'DEC'
 };
-const looksLikeOption = (u) => /\b(CE|PE)\b/.test(u) || /\b\d{3,6}\b/.test(u); // strike present → likely option
+const looksLikeOption = (u) => /\b(CE|PE)\b/.test(u) || /\b\d{3,6}\b/.test(u);
 
 function parseMonthYear(u) {
-  // 1) DD-MON-YYYY (day ignored)
   const dmy = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*(\d{4})\b/);
   if (dmy) return { mon: MONTH_MAP[dmy[2]], year: dmy[3] };
-
-  // 2) MON-YYYY or MONYYYY
   const my = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*(\d{4})\b/);
   if (my) return { mon: MONTH_MAP[my[1]], year: my[2] };
-
   return null;
 }
 
 function extractUnderlying(u) {
-  // take leading token(s) until we hit a month token or a digit-heavy block
-  // examples: "TITAN", "RELIANCE", "LT", "ONGC"
   const tokens = u.split(/[\s-]+/).filter(Boolean);
   let out = tokens[0] || '';
-  // If first token is a month (rare), fallback to letters before month
   if (MONTH_MAP[out]) {
     const m = u.match(/^([A-Z]+)[\s-]/);
     if (m) out = m[1];
@@ -65,11 +57,8 @@ function normalizeSymbol(raw) {
   const u = String(raw || '').toUpperCase().replace(/\s+/g, ' ').trim();
   const my = parseMonthYear(u);
   const und = extractUnderlying(u);
-  const kind = looksLikeOption(u) ? 'OPT' : 'FUT'; // default to FUT if no clear option markers
-  if (und && my?.mon && my?.year) {
-    return `${und}-${my.mon}${my.year}-${kind}`; // e.g., TITAN-SEP2025-FUT
-  }
-  // fallback: remove non-alphanum
+  const kind = looksLikeOption(u) ? 'OPT' : 'FUT';
+  if (und && my?.mon && my?.year) return `${und}-${my.mon}${my.year}-${kind}`;
   return `${u.replace(/[^A-Z0-9]/g, '')}-${kind}`;
 }
 /* ------------------------------------------------------- */
@@ -79,11 +68,11 @@ export default function Orders() {
   const [selectedIds, setSelectedIds] = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  /* search */
+  // search
   const [query, setQuery] = useState('');
   const qTokens = useMemo(() => query.trim().split(/\s+/).filter(Boolean), [query]);
 
-  /* modify modal (batch-aware) */
+  // modify modal (batch-aware)
   const [showModify, setShowModify] = useState(false);
   const [modifyTarget, setModifyTarget] = useState(null); // {symbol, key, orders:[{name,symbol,price,order_id}]}
   const [modQty, setModQty] = useState('');
@@ -141,7 +130,7 @@ export default function Orders() {
 
   const toggle = (rowId) => setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
 
-  /* -------- Cancel (unchanged) -------- */
+  // ----- Cancel -----
   const cancelSelected = async () => {
     const rows = document.querySelectorAll('#pending_table tbody tr');
     const selectedOrders = [];
@@ -171,7 +160,7 @@ export default function Orders() {
     }
   };
 
-  /* ----- Modify helpers ----- */
+  // ----- Modify helpers -----
   const requires = (displayType) => {
     const canon = DISPLAY_TO_CANON[displayType] || displayType;
     return { price: ['LIMIT', 'STOPLOSS'].includes(canon), trig: ['STOPLOSS', 'STOPLOSS_MARKET'].includes(canon), canon };
@@ -185,7 +174,7 @@ export default function Orders() {
     } catch { /* ignore */ }
   };
 
-  /* OPEN MODIFY — allow multiple if normalized keys are equal */
+  // OPEN MODIFY — allow multiple if normalized keys are equal
   const openModify = () => {
     const rows = document.querySelectorAll('#pending_table tbody tr');
     const chosen = [];
@@ -219,12 +208,11 @@ export default function Orders() {
     if (chosen[0].symbol) tryFetchLTP(chosen[0].symbol);
   };
 
-  /* SUBMIT MODIFY — applies same change to all selected orders */
+  // SUBMIT MODIFY — applies same change to all selected orders
   const submitModify = async () => {
     if (!modifyTarget) return;
     const need = requires(modType);
 
-    // validate shared inputs
     let qtyNum, priceNum, trigNum;
     if (modQty !== '') {
       qtyNum = parseInt(modQty, 10);
@@ -282,23 +270,7 @@ export default function Orders() {
     }
   };
 
-  /* search helpers (symbol only) */
-  const filterBySymbol = (rows) => {
-    if (qTokens.length === 0) return rows;
-    return rows.filter((r) => {
-      const sym = String(r.symbol || '').toUpperCase();
-      return qTokens.every((t) => sym.includes(t.toUpperCase()));
-    });
-  };
-
-  const filtered = {
-    pending: filterBySymbol(orders.pending),
-    traded: filterBySymbol(orders.traded),
-    rejected: filterBySymbol(orders.rejected),
-    cancelled: filterBySymbol(orders.cancelled),
-    others: filterBySymbol(orders.others),
-  };
-
+  /* ------- single set of search/render helpers ------- */
   const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const highlightSymbol = (sym) => {
     const text = sym ?? 'N/A';
@@ -313,6 +285,24 @@ export default function Orders() {
       return text;
     }
   };
+
+  const filterBySymbol = (rows) => {
+    if (qTokens.length === 0) return rows;
+    return rows.filter((r) => {
+      const sym = String(r.symbol || '').toUpperCase();
+      return qTokens.every((t) => sym.includes(t.toUpperCase()));
+    });
+  };
+
+  const filtered = useMemo(() => ({
+    pending: filterBySymbol(orders.pending),
+    traded: filterBySymbol(orders.traded),
+    rejected: filterBySymbol(orders.rejected),
+    cancelled: filterBySymbol(orders.cancelled),
+    others: filterBySymbol(orders.others),
+  }), [orders, qTokens]);
+
+  /* --------------------------------------------------- */
 
   const renderModifyModal = () => {
     if (!modifyTarget) return null;
@@ -439,22 +429,6 @@ export default function Orders() {
       </tbody>
     </Table>
   );
-
-  /* search view */
-  const filterBySymbol = (rows) => {
-    if (qTokens.length === 0) return rows;
-    return rows.filter((r) => {
-      const sym = String(r.symbol || '').toUpperCase();
-      return qTokens.every((t) => sym.includes(t.toUpperCase()));
-    });
-  };
-  const filtered = {
-    pending: filterBySymbol(orders.pending),
-    traded: filterBySymbol(orders.traded),
-    rejected: filterBySymbol(orders.rejected),
-    cancelled: filterBySymbol(orders.cancelled),
-    others: filterBySymbol(orders.others),
-  };
 
   return (
     <Card className="p-3 softCard">
