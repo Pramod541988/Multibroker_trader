@@ -28,37 +28,60 @@ const DISPLAY_TO_CANON = {
   'SL MARKET': 'STOPLOSS_MARKET',
 };
 
-/* ---------- Broker-agnostic symbol normalizer ---------- */
+/* ---------- Broker-agnostic symbol normalizer (improved) ---------- */
 const MONTH_MAP = {
   JAN: 'JAN', FEB: 'FEB', MAR: 'MAR', APR: 'APR', MAY: 'MAY', JUN: 'JUN',
   JUL: 'JUL', AUG: 'AUG', SEP: 'SEP', SEPT: 'SEP', OCT: 'OCT', NOV: 'NOV', DEC: 'DEC'
 };
-const looksLikeOption = (u) => /\b(CE|PE)\b/.test(u) || /\b\d{3,6}\b/.test(u);
+// option detector (strike + CE/PE)
+const looksLikeOption = (u) => /\b(CE|PE)\b/.test(u) || /\b\d{3,6}(?:CE|PE)?\b/.test(u);
+// normalize odd spaces/hyphens from brokers
+const sanitize = (s) => String(s || '')
+  .toUpperCase()
+  .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ') // unicode spaces → space
+  .replace(/[–—−]/g, '-')                                       // fancy hyphens → -
+  .replace(/\s+/g, ' ')
+  .trim();
 
 function parseMonthYear(u) {
-  const dmy = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*(\d{4})\b/);
-  if (dmy) return { mon: MONTH_MAP[dmy[2]], year: dmy[3] };
-  const my = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*(\d{4})\b/);
-  if (my) return { mon: MONTH_MAP[my[1]], year: my[2] };
+  // 1) DD-MON-YYYY (ignore day)
+  let m = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
+  if (m) return { mon: MONTH_MAP[m[2]], year: m[3] };
+  // 2) MONYYYY or MON-YYYY or MON YYYY
+  m = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
+  if (m) return { mon: MONTH_MAP[m[1]], year: m[2] };
   return null;
 }
 
-function extractUnderlying(u) {
-  const tokens = u.split(/[\s-]+/).filter(Boolean);
-  let out = tokens[0] || '';
-  if (MONTH_MAP[out]) {
-    const m = u.match(/^([A-Z]+)[\s-]/);
-    if (m) out = m[1];
-  }
-  return out.replace(/[^A-Z0-9]/g, '');
-}
-
 function normalizeSymbol(raw) {
-  const u = String(raw || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  const u = sanitize(raw);
+  const tokens = u.split(/[\s\-_/]+/).filter(Boolean);
+
+  // stitch underlying: take leading tokens until month token (or glued month+year), year, or FUT/CE/PE.
+  // If a pure day (1–31) is just before month, drop it (e.g., "TIT AN 30 SEP 2025").
+  const isMonthHead = (t) => /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)/.test(t);
+  const isYear = (t) => /^\d{4}$/.test(t);
+  const isDay = (t) => /^\d{1,2}$/.test(t);
+  const isTailFlag = (t) => /^(FUT|OPT|CE|PE)$/.test(t);
+  const isMonthGlued = (t) => /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*\d{4}$/.test(t);
+
+  let underlyingParts = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (isTailFlag(t) || isYear(t) || isMonthHead(t) || isMonthGlued(t)) {
+      if (underlyingParts.length && isDay(underlyingParts[underlyingParts.length - 1])) {
+        underlyingParts.pop(); // drop the day before month
+      }
+      break;
+    }
+    underlyingParts.push(t);
+  }
+  const underlying = underlyingParts.join('').replace(/[^A-Z0-9]/g, '');
+
   const my = parseMonthYear(u);
-  const und = extractUnderlying(u);
   const kind = looksLikeOption(u) ? 'OPT' : 'FUT';
-  if (und && my?.mon && my?.year) return `${und}-${my.mon}${my.year}-${kind}`;
+  if (underlying && my?.mon && my?.year) return `${underlying}-${my.mon}${my.year}-${kind}`;
+  // fallback
   return `${u.replace(/[^A-Z0-9]/g, '')}-${kind}`;
 }
 /* ------------------------------------------------------- */
@@ -68,7 +91,7 @@ export default function Orders() {
   const [selectedIds, setSelectedIds] = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  // search
+  // search state
   const [query, setQuery] = useState('');
   const qTokens = useMemo(() => query.trim().split(/\s+/).filter(Boolean), [query]);
 
