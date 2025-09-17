@@ -28,63 +28,63 @@ const DISPLAY_TO_CANON = {
   'SL MARKET': 'STOPLOSS_MARKET',
 };
 
-/* ---------- Broker-agnostic symbol normalizer (improved) ---------- */
+/* ---------- Broker-agnostic symbol parsing ---------- */
 const MONTH_MAP = {
   JAN: 'JAN', FEB: 'FEB', MAR: 'MAR', APR: 'APR', MAY: 'MAY', JUN: 'JUN',
   JUL: 'JUL', AUG: 'AUG', SEP: 'SEP', SEPT: 'SEP', OCT: 'OCT', NOV: 'NOV', DEC: 'DEC'
 };
-// option detector (strike + CE/PE)
-const looksLikeOption = (u) => /\b(CE|PE)\b/.test(u) || /\b\d{3,6}(?:CE|PE)?\b/.test(u);
-// normalize odd spaces/hyphens from brokers
+
 const sanitize = (s) => String(s || '')
   .toUpperCase()
   .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ') // unicode spaces → space
-  .replace(/[–—−]/g, '-')                                       // fancy hyphens → -
+  .replace(/[–—−]/g, '-')                                       // various dashes → -
   .replace(/\s+/g, ' ')
   .trim();
 
-function parseMonthYear(u) {
-  // 1) DD-MON-YYYY (ignore day)
-  let m = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
-  if (m) return { mon: MONTH_MAP[m[2]], year: m[3] };
-  // 2) MONYYYY or MON-YYYY or MON YYYY
-  m = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
-  if (m) return { mon: MONTH_MAP[m[1]], year: m[2] };
-  return null;
-}
+const isMonthHead = (t) => /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)/.test(t);
+const isYear = (t) => /^\d{4}$/.test(t);
+const isDay = (t) => /^\d{1,2}$/.test(t);
+const isTailFlag = (t) => /^(FUT|OPT|CE|PE)$/.test(t);
 
-function normalizeSymbol(raw) {
+/** Extract {und, mon, year, kind} from a broker symbol string */
+function parseSymbol(raw) {
   const u = sanitize(raw);
   const tokens = u.split(/[\s\-_/]+/).filter(Boolean);
 
-  // stitch underlying: take leading tokens until month token (or glued month+year), year, or FUT/CE/PE.
-  // If a pure day (1–31) is just before month, drop it (e.g., "TIT AN 30 SEP 2025").
-  const isMonthHead = (t) => /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)/.test(t);
-  const isYear = (t) => /^\d{4}$/.test(t);
-  const isDay = (t) => /^\d{1,2}$/.test(t);
-  const isTailFlag = (t) => /^(FUT|OPT|CE|PE)$/.test(t);
-  const isMonthGlued = (t) => /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*\d{4}$/.test(t);
-
-  let underlyingParts = [];
+  // Build underlying: concat tokens until we hit month/year/flags. Drop a 1–31 day just before month.
+  let undParts = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
-    if (isTailFlag(t) || isYear(t) || isMonthHead(t) || isMonthGlued(t)) {
-      if (underlyingParts.length && isDay(underlyingParts[underlyingParts.length - 1])) {
-        underlyingParts.pop(); // drop the day before month
-      }
+    if (isTailFlag(t) || isYear(t) || isMonthHead(t)) {
+      if (undParts.length && isDay(undParts[undParts.length - 1])) undParts.pop();
       break;
     }
-    underlyingParts.push(t);
+    undParts.push(t);
   }
-  const underlying = underlyingParts.join('').replace(/[^A-Z0-9]/g, '');
+  const und = undParts.join('').replace(/[^A-Z0-9]/g, '');
 
-  const my = parseMonthYear(u);
-  const kind = looksLikeOption(u) ? 'OPT' : 'FUT';
-  if (underlying && my?.mon && my?.year) return `${underlying}-${my.mon}${my.year}-${kind}`;
-  // fallback
-  return `${u.replace(/[^A-Z0-9]/g, '')}-${kind}`;
+  // Find month+year anywhere in the string (handles "30-Sep-2025", "Sep-2025", "Sep2025")
+  let mon=null, year=null;
+  let m;
+  m = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
+  if (m) { mon = MONTH_MAP[m[2]]; year = m[3]; }
+  if (!mon) {
+    m = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*((?:19|20)\d{2})\b/);
+    if (m) { mon = MONTH_MAP[m[1]]; year = m[2]; }
+  }
+  // Kind: treat as OPT only if CE/PE is present explicitly, else FUT
+  const kind = /\b(CE|PE)\b/.test(u) ? 'OPT' : 'FUT';
+
+  return { und, mon, year, kind };
 }
-/* ------------------------------------------------------- */
+
+/** Canonical key for equality checks. By default, IGNORE kind for batching. */
+function canonicalKey(raw, { includeKind = false } = {}) {
+  const { und, mon, year, kind } = parseSymbol(raw);
+  const base = (und && mon && year) ? `${und}-${mon}${year}` : sanitize(raw).replace(/[^A-Z0-9]/g, '');
+  return includeKind ? `${base}-${kind}` : base;
+}
+/* ---------------------------------------------------- */
 
 export default function Orders() {
   const [orders, setOrders] = useState({ pending: [], traded: [], rejected: [], cancelled: [], others: [] });
@@ -107,6 +107,7 @@ export default function Orders() {
 
   const busyRef = useRef(false);
   const snapRef = useRef('');
+  theIntervalCleanupWarning: void 0; // avoids accidental shadowing
   const timerRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -197,7 +198,7 @@ export default function Orders() {
     } catch { /* ignore */ }
   };
 
-  // OPEN MODIFY — allow multiple if normalized keys are equal
+  // OPEN MODIFY — allow multiple if canonical keys (without kind) are equal
   const openModify = () => {
     const rows = document.querySelectorAll('#pending_table tbody tr');
     const chosen = [];
@@ -216,9 +217,15 @@ export default function Orders() {
 
     if (chosen.length === 0) return alert('Select at least one pending order to modify.');
 
-    const key0 = normalizeSymbol(chosen[0].symbol);
-    const allSame = chosen.every((c) => normalizeSymbol(c.symbol) === key0);
-    if (!allSame) return alert('Please select orders with the SAME Symbol to batch modify.');
+    const key0 = canonicalKey(chosen[0].symbol, { includeKind: false });
+    const allSame = chosen.every((c) => canonicalKey(c.symbol, { includeKind: false }) === key0);
+
+    if (!allSame) {
+      // Helpful debug so you can see what the app thinks each key is
+      const diag = chosen.map((c) => `${c.symbol} → ${canonicalKey(c.symbol, { includeKind: false })}`).join('\n');
+      alert('Please select orders with the SAME Symbol to batch modify.\n\n' + diag);
+      return;
+    }
 
     const single = chosen.length === 1;
     setModifyTarget({ symbol: chosen[0].symbol, key: key0, orders: chosen });
@@ -293,7 +300,7 @@ export default function Orders() {
     }
   };
 
-  /* ------- single set of search/render helpers ------- */
+  /* ------- search + highlight ------- */
   const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const highlightSymbol = (sym) => {
     const text = sym ?? 'N/A';
