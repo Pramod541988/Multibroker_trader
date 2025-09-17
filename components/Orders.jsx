@@ -1,15 +1,16 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import { Button, Card, Table, Tabs, Tab, Badge, Modal, Form, Spinner } from 'react-bootstrap';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Card, Table, Tabs, Tab, Badge, Modal, Form, Spinner, InputGroup } from 'react-bootstrap';
+import { Search as SearchIcon, XCircle } from 'lucide-react';
 import api from './api';
 
 const AUTO_REFRESH_MS = 3000;
 
 const DISPLAY_TO_CANON = {
-  'NO_CHANGE': 'NO_CHANGE',
-  'LIMIT': 'LIMIT',
-  'MARKET': 'MARKET',
-  'STOPLOSS': 'STOPLOSS',
+  NO_CHANGE: 'NO_CHANGE',
+  LIMIT: 'LIMIT',
+  MARKET: 'MARKET',
+  STOPLOSS: 'STOPLOSS',
   'SL MARKET': 'STOPLOSS_MARKET',
 };
 
@@ -17,6 +18,17 @@ export default function Orders() {
   const [orders, setOrders] = useState({ pending: [], traded: [], rejected: [], cancelled: [], others: [] });
   const [selectedIds, setSelectedIds] = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
+
+  // search
+  const [query, setQuery] = useState('');
+  const qTokens = useMemo(
+    () =>
+      query
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean),
+    [query]
+  );
 
   // modify modal
   const [showModify, setShowModify] = useState(false);
@@ -66,21 +78,23 @@ export default function Orders() {
   };
 
   useEffect(() => {
-    fetchAll().catch(()=>{});
-    timerRef.current = setInterval(() => { fetchAll().catch(()=>{}); }, AUTO_REFRESH_MS);
+    fetchAll().catch(() => {});
+    timerRef.current = setInterval(() => {
+      fetchAll().catch(() => {});
+    }, AUTO_REFRESH_MS);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (abortRef.current) abortRef.current.abort();
     };
   }, []);
 
-  const toggle = (rowId) => setSelectedIds(prev => ({...prev, [rowId]: !prev[rowId]}));
+  const toggle = (rowId) => setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
 
   // ----- Cancel -----
   const cancelSelected = async () => {
     const rows = document.querySelectorAll('#pending_table tbody tr');
     const selectedOrders = [];
-    rows.forEach(tr => {
+    rows.forEach((tr) => {
       const rowId = tr.getAttribute('data-rowid');
       if (selectedIds[rowId]) {
         const tds = tr.querySelectorAll('td');
@@ -111,7 +125,7 @@ export default function Orders() {
     const canon = DISPLAY_TO_CANON[displayType] || displayType;
     return {
       price: ['LIMIT', 'STOPLOSS'].includes(canon),
-      trig:  ['STOPLOSS', 'STOPLOSS_MARKET'].includes(canon),
+      trig: ['STOPLOSS', 'STOPLOSS_MARKET'].includes(canon),
       canon,
     };
   };
@@ -121,13 +135,15 @@ export default function Orders() {
       const r = await api.get('/ltp', { params: { symbol } }); // optional; ignore if not implemented
       const v = Number(r?.data?.ltp);
       if (!Number.isNaN(v)) setModLTP(v.toFixed(2));
-    } catch {/* no-op */}
+    } catch {
+      /* no-op */
+    }
   };
 
   const openModify = () => {
     const rows = document.querySelectorAll('#pending_table tbody tr');
     const chosen = [];
-    rows.forEach(tr => {
+    rows.forEach((tr) => {
       const rowId = tr.getAttribute('data-rowid');
       if (selectedIds[rowId]) {
         const tds = tr.querySelectorAll('td');
@@ -174,7 +190,6 @@ export default function Orders() {
       if (Number.isNaN(trigNum) || trigNum <= 0) return alert('Trigger price must be a positive number.');
     }
 
-    // Enforce requireds only when an explicit order type is chosen
     if (modType !== 'NO_CHANGE') {
       if (need.price && !(modPrice !== '' && priceNum > 0)) {
         return alert('Selected Order Type requires Price.');
@@ -211,6 +226,44 @@ export default function Orders() {
     }
   };
 
+  // --- search helpers (symbol only) ---
+  const filterBySymbol = (rows) => {
+    if (qTokens.length === 0) return rows;
+    return rows.filter((r) => {
+      const sym = String(r.symbol || '').toUpperCase();
+      return qTokens.every((t) => sym.includes(t.toUpperCase()));
+    });
+  };
+
+  const filtered = {
+    pending: filterBySymbol(orders.pending),
+    traded: filterBySymbol(orders.traded),
+    rejected: filterBySymbol(orders.rejected),
+    cancelled: filterBySymbol(orders.cancelled),
+    others: filterBySymbol(orders.others),
+  };
+
+  const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const highlightSymbol = (sym) => {
+    const text = sym ?? 'N/A';
+    if (!text || qTokens.length === 0) return text;
+    try {
+      const re = new RegExp(`(${qTokens.map(escapeReg).join('|')})`, 'gi');
+      const parts = String(text).split(re);
+      return parts.map((p, i) =>
+        re.test(p) ? (
+          <mark key={i} className="hl">
+            {p}
+          </mark>
+        ) : (
+          <span key={i}>{p}</span>
+        )
+      );
+    } catch {
+      return text;
+    }
+  };
+
   const renderModifyModal = () => {
     const need = requires(modType);
     return (
@@ -222,14 +275,20 @@ export default function Orders() {
           {modifyTarget && (
             <>
               <div className="small mb-2">
-                <div><strong>Symbol:</strong> {modifyTarget.symbol}</div>
-                <div><strong>Order ID:</strong> {modifyTarget.order_id}</div>
+                <div>
+                  <strong>Symbol:</strong> {modifyTarget.symbol}
+                </div>
+                <div>
+                  <strong>Order ID:</strong> {modifyTarget.order_id}
+                </div>
               </div>
 
               {/* LTP display */}
               <div className="mb-2">
-                <div className="text-uppercase text-muted" style={{fontSize:'0.75rem'}}>LTP</div>
-                <div style={{fontWeight:700, fontSize:'1.1rem'}}>{modLTP}</div>
+                <div className="text-uppercase text-muted" style={{ fontSize: '0.75rem' }}>
+                  LTP
+                </div>
+                <div style={{ fontWeight: 700, fontSize: '1.1rem' }}>{modLTP}</div>
               </div>
 
               <Form
@@ -287,21 +346,21 @@ export default function Orders() {
                 <Form.Group className="mb-1">
                   <Form.Label className="mb-1 fw-semibold">Order Type</Form.Label>
                   <div className="d-flex align-items-center flex-wrap gap-3">
-                    {['NO_CHANGE','LIMIT','MARKET','STOPLOSS','SL MARKET'].map(ot => (
+                    {['NO_CHANGE', 'LIMIT', 'MARKET', 'STOPLOSS', 'SL MARKET'].map((ot) => (
                       <Form.Check
                         key={ot}
                         inline
                         type="radio"
                         name="modifyOrderType"
-                        label={ot.replace('SL MARKET','SL_MARKET')}
-                        checked={modType===ot}
-                        onChange={()=>setModType(ot)}
+                        label={ot.replace('SL MARKET', 'SL_MARKET')}
+                        checked={modType === ot}
+                        onChange={() => setModType(ot)}
                       />
                     ))}
                   </div>
                   <div className="form-text">
-                    LIMIT → needs <strong>Price</strong>. SL-L → needs <strong>Price</strong> &amp; <strong>Trig</strong>. SL-M → needs <strong>Trig</strong>.
-                    Keep default values &amp; change only what you need. Press <kbd>Enter</kbd> to submit.
+                    LIMIT → needs <strong>Price</strong>. SL-L → needs <strong>Price</strong> &amp; <strong>Trig</strong>. SL-M → needs <strong>Trig</strong>. Keep default
+                    values &amp; change only what you need. Press <kbd>Enter</kbd> to submit.
                   </div>
                 </Form.Group>
               </Form>
@@ -309,7 +368,9 @@ export default function Orders() {
           )}
         </Modal.Body>
         <Modal.Footer className="footerNudge">
-          <Button variant="secondary" onClick={() => setShowModify(false)} disabled={modSaving}>Cancel</Button>
+          <Button variant="secondary" onClick={() => setShowModify(false)} disabled={modSaving}>
+            Cancel
+          </Button>
           <Button variant="warning" onClick={submitModify} disabled={modSaving}>
             {modSaving ? <Spinner size="sm" animation="border" className="me-2" /> : null}
             Modify
@@ -318,9 +379,13 @@ export default function Orders() {
 
         {/* modal-local styles to mirror TradeForm */}
         <style jsx global>{`
-          .modalCardPad { padding: 0.5rem 1.25rem 0.75rem; }
+          .modalCardPad {
+            padding: 0.5rem 1.25rem 0.75rem;
+          }
           @media (min-width: 992px) {
-            .modalCardPad { padding: 0.75rem 1.5rem 1rem; }
+            .modalCardPad {
+              padding: 0.75rem 1.5rem 1rem;
+            }
           }
           .blueTone {
             background: linear-gradient(180deg, #f9fbff 0%, #f3f7ff 100%) !important;
@@ -328,9 +393,16 @@ export default function Orders() {
             box-shadow: 0 0 0 6px rgba(49, 132, 253, 0.12) !important;
             border-radius: 10px !important;
           }
-          .label-tight { margin-bottom: 4px; }
-          .footerNudge { padding-right: 1.25rem; } /* subtle right nudge like TradeForm */
-          input[type="radio"], input[type="checkbox"] { accent-color: #0d6efd; }
+          .label-tight {
+            margin-bottom: 4px;
+          }
+          .footerNudge {
+            padding-right: 1.25rem;
+          }
+          input[type='radio'],
+          input[type='checkbox'] {
+            accent-color: #0d6efd;
+          }
         `}</style>
       </Modal>
     );
@@ -339,50 +411,134 @@ export default function Orders() {
   const renderTable = (rows, id) => (
     <Table bordered hover size="sm" id={id}>
       <thead>
-        <tr><th>Select</th><th>Name</th><th>Symbol</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th>Order ID</th></tr>
+        <tr>
+          <th>Select</th>
+          <th>Name</th>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th>Qty</th>
+          <th>Price</th>
+          <th>Status</th>
+          <th>Order ID</th>
+        </tr>
       </thead>
       <tbody>
         {rows.length === 0 ? (
-          <tr><td colSpan={8} className="text-center">No data</td></tr>
-        ) : rows.map((row, idx) => {
-          const rowId = `${row.name}-${row.symbol}-${row.order_id || row.status || idx}`;
-          return (
-            <tr key={rowId} data-rowid={rowId}>
-              <td><input type="checkbox" checked={!!selectedIds[rowId]} onChange={()=>toggle(rowId)} /></td>
-              <td>{row.name ?? 'N/A'}</td>
-              <td>{row.symbol ?? 'N/A'}</td>
-              <td>{row.transaction_type ?? 'N/A'}</td>
-              <td>{row.quantity ?? 'N/A'}</td>
-              <td>{row.price ?? 'N/A'}</td>
-              <td>{row.status ?? 'N/A'}</td>
-              <td>{row.order_id ?? 'N/A'}</td>
-            </tr>
-          );
-        })}
+          <tr>
+            <td colSpan={8} className="text-center">
+              No data
+            </td>
+          </tr>
+        ) : (
+          rows.map((row, idx) => {
+            const rowId = `${row.name}-${row.symbol}-${row.order_id || row.status || idx}`;
+            return (
+              <tr key={rowId} data-rowid={rowId}>
+                <td>
+                  <input type="checkbox" checked={!!selectedIds[rowId]} onChange={() => toggle(rowId)} />
+                </td>
+                <td>{row.name ?? 'N/A'}</td>
+                <td>{highlightSymbol(row.symbol)}</td>
+                <td>{row.transaction_type ?? 'N/A'}</td>
+                <td>{row.quantity ?? 'N/A'}</td>
+                <td>{row.price ?? 'N/A'}</td>
+                <td>{row.status ?? 'N/A'}</td>
+                <td>{row.order_id ?? 'N/A'}</td>
+              </tr>
+            );
+          })
+        )}
       </tbody>
     </Table>
   );
 
   return (
-    <Card className="p-3">
-      <div className="mb-3 d-flex gap-2 align-items-center">
-        <Button onClick={()=>fetchAll()}>Refresh Orders</Button>
-        <Button variant="warning" onClick={openModify}>Modify Order</Button>
-        <Button variant="danger" onClick={cancelSelected}>Cancel Order</Button>
-        <Badge bg="secondary" className="ms-auto">
-          Auto-refresh: {Math.round(AUTO_REFRESH_MS/1000)}s {lastUpdated ? `· Updated ${lastUpdated.toLocaleTimeString()}` : ''}
+    <Card className="p-3 softCard">
+      {/* Top toolbar */}
+      <div className="mb-3 d-flex gap-2 align-items-center flex-wrap">
+        <Button onClick={() => fetchAll()}>Refresh Orders</Button>
+        <Button variant="warning" onClick={openModify}>
+          Modify Order
+        </Button>
+        <Button variant="danger" onClick={cancelSelected}>
+          Cancel Order
+        </Button>
+
+        {/* Search by Symbol */}
+        <div className="ms-auto">
+          <InputGroup className="searchGroup">
+            <InputGroup.Text title="Search by Symbol">
+              <SearchIcon size={16} />
+            </InputGroup.Text>
+            <Form.Control
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setQuery('');
+              }}
+              placeholder="Search symbol (e.g., RELIANCE)"
+              aria-label="Search by symbol"
+            />
+            {query ? (
+              <Button variant="outline-secondary" onClick={() => setQuery('')} title="Clear">
+                <XCircle size={16} />
+              </Button>
+            ) : null}
+          </InputGroup>
+        </div>
+
+        <Badge bg="secondary" className="ms-2">
+          Auto-refresh: {Math.round(AUTO_REFRESH_MS / 1000)}s {lastUpdated ? `· Updated ${lastUpdated.toLocaleTimeString()}` : ''}
         </Badge>
       </div>
 
       <Tabs defaultActiveKey="pending" className="mb-3">
-        <Tab eventKey="pending" title="Pending">{renderTable(orders.pending, 'pending_table')}</Tab>
-        <Tab eventKey="traded" title="Traded">{renderTable(orders.traded, 'traded_table')}</Tab>
-        <Tab eventKey="rejected" title="Rejected">{renderTable(orders.rejected, 'rejected_table')}</Tab>
-        <Tab eventKey="cancelled" title="Cancelled">{renderTable(orders.cancelled, 'cancelled_table')}</Tab>
-        <Tab eventKey="others" title="Others">{renderTable(orders.others, 'others_table')}</Tab>
+        <Tab eventKey="pending" title="Pending">
+          {renderTable(filtered.pending, 'pending_table')}
+        </Tab>
+        <Tab eventKey="traded" title="Traded">
+          {renderTable(filtered.traded, 'traded_table')}
+        </Tab>
+        <Tab eventKey="rejected" title="Rejected">
+          {renderTable(filtered.rejected, 'rejected_table')}
+        </Tab>
+        <Tab eventKey="cancelled" title="Cancelled">
+          {renderTable(filtered.cancelled, 'cancelled_table')}
+        </Tab>
+        <Tab eventKey="others" title="Others">
+          {renderTable(filtered.others, 'others_table')}
+        </Tab>
       </Tabs>
 
       {renderModifyModal()}
+
+      {/* Local styles for search + card */}
+      <style jsx global>{`
+        .softCard {
+          border: 1px solid #e6efff;
+          box-shadow: 0 2px 12px rgba(13, 110, 253, 0.06);
+          border-radius: 12px;
+        }
+        .searchGroup {
+          min-width: 280px;
+          max-width: 360px;
+        }
+        .searchGroup .input-group-text {
+          background: #eaf3ff;
+          border-color: #cfe2ff;
+        }
+        .searchGroup .form-control {
+          border-color: #cfe2ff;
+        }
+        .searchGroup .btn {
+          border-color: #cfe2ff;
+        }
+        mark.hl {
+          background: #fff3cd;
+          padding: 0 2px;
+          border-radius: 2px;
+        }
+      `}</style>
     </Card>
   );
 }
