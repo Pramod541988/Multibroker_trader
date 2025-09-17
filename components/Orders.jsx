@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Table, Tabs, Tab, Badge, Modal, Form, Spinner, InputGroup } from 'react-bootstrap';
 import api from './api';
 
-/* === Inline icons to avoid extra deps === */
+/* === Inline icons (no extra deps) === */
 const SearchIcon = (props) => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
@@ -28,8 +28,51 @@ const DISPLAY_TO_CANON = {
   'SL MARKET': 'STOPLOSS_MARKET',
 };
 
-/* normalize symbols so users can pick rows that look the same */
-const normalizeSymbol = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+/* ---------- Broker-agnostic symbol normalizer ---------- */
+/* Goal: produce same key for "TITAN-Sep2025-FUT" and "TITAN 30-Sep-2025" => "TITAN-SEP2025-FUT". */
+const MONTH_MAP = {
+  JAN: 'JAN', FEB: 'FEB', MAR: 'MAR', APR: 'APR', MAY: 'MAY', JUN: 'JUN',
+  JUL: 'JUL', AUG: 'AUG', SEP: 'SEP', SEPT: 'SEP', OCT: 'OCT', NOV: 'NOV', DEC: 'DEC'
+};
+const looksLikeOption = (u) => /\b(CE|PE)\b/.test(u) || /\b\d{3,6}\b/.test(u); // strike present → likely option
+
+function parseMonthYear(u) {
+  // 1) DD-MON-YYYY (day ignored)
+  const dmy = u.match(/\b(\d{1,2})[-\s]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*(\d{4})\b/);
+  if (dmy) return { mon: MONTH_MAP[dmy[2]], year: dmy[3] };
+
+  // 2) MON-YYYY or MONYYYY
+  const my = u.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*[-\s]*(\d{4})\b/);
+  if (my) return { mon: MONTH_MAP[my[1]], year: my[2] };
+
+  return null;
+}
+
+function extractUnderlying(u) {
+  // take leading token(s) until we hit a month token or a digit-heavy block
+  // examples: "TITAN", "RELIANCE", "LT", "ONGC"
+  const tokens = u.split(/[\s-]+/).filter(Boolean);
+  let out = tokens[0] || '';
+  // If first token is a month (rare), fallback to letters before month
+  if (MONTH_MAP[out]) {
+    const m = u.match(/^([A-Z]+)[\s-]/);
+    if (m) out = m[1];
+  }
+  return out.replace(/[^A-Z0-9]/g, '');
+}
+
+function normalizeSymbol(raw) {
+  const u = String(raw || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  const my = parseMonthYear(u);
+  const und = extractUnderlying(u);
+  const kind = looksLikeOption(u) ? 'OPT' : 'FUT'; // default to FUT if no clear option markers
+  if (und && my?.mon && my?.year) {
+    return `${und}-${my.mon}${my.year}-${kind}`; // e.g., TITAN-SEP2025-FUT
+  }
+  // fallback: remove non-alphanum
+  return `${u.replace(/[^A-Z0-9]/g, '')}-${kind}`;
+}
+/* ------------------------------------------------------- */
 
 export default function Orders() {
   const [orders, setOrders] = useState({ pending: [], traded: [], rejected: [], cancelled: [], others: [] });
@@ -40,9 +83,9 @@ export default function Orders() {
   const [query, setQuery] = useState('');
   const qTokens = useMemo(() => query.trim().split(/\s+/).filter(Boolean), [query]);
 
-  /* modify modal (now supports batch) */
+  /* modify modal (batch-aware) */
   const [showModify, setShowModify] = useState(false);
-  const [modifyTarget, setModifyTarget] = useState(null); // {symbol, normSymbol, orders:[{name,symbol,price,order_id}]}
+  const [modifyTarget, setModifyTarget] = useState(null); // {symbol, key, orders:[{name,symbol,price,order_id}]}
   const [modQty, setModQty] = useState('');
   const [modPrice, setModPrice] = useState('');
   const [modTrig, setModTrig] = useState('');
@@ -142,7 +185,7 @@ export default function Orders() {
     } catch { /* ignore */ }
   };
 
-  /* OPEN MODIFY — now allows multiple pending of the SAME symbol */
+  /* OPEN MODIFY — allow multiple if normalized keys are equal */
   const openModify = () => {
     const rows = document.querySelectorAll('#pending_table tbody tr');
     const chosen = [];
@@ -161,14 +204,12 @@ export default function Orders() {
 
     if (chosen.length === 0) return alert('Select at least one pending order to modify.');
 
-    // ensure all selected share the same normalized symbol
-    const base = normalizeSymbol(chosen[0].symbol);
-    const allSame = chosen.every((c) => normalizeSymbol(c.symbol) === base);
+    const key0 = normalizeSymbol(chosen[0].symbol);
+    const allSame = chosen.every((c) => normalizeSymbol(c.symbol) === key0);
     if (!allSame) return alert('Please select orders with the SAME Symbol to batch modify.');
 
-    // prefill (leave price blank when multiple to avoid accidental overwrite)
     const single = chosen.length === 1;
-    setModifyTarget({ symbol: chosen[0].symbol, normSymbol: base, orders: chosen });
+    setModifyTarget({ symbol: chosen[0].symbol, key: key0, orders: chosen });
     setModPrice(single ? (Number.isFinite(parseFloat(chosen[0].price)) ? String(parseFloat(chosen[0].price)) : '') : '');
     setModTrig('');
     setModQty('');
@@ -299,20 +340,13 @@ export default function Orders() {
             <div style={{ fontWeight: 700, fontSize: '1.1rem' }}>{modLTP}</div>
           </div>
 
-          <Form
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                submitModify();
-              }
-            }}
-          >
+          <Form onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submitModify(); } }}>
             <Form.Group className="mb-2">
               <Form.Label className="label-tight">Quantity</Form.Label>
               <Form.Control
                 type="number" min="1" step="1"
                 value={modQty} onChange={(e) => setModQty(e.target.value)}
-                placeholder={isBatch ? 'Leave blank to keep same (applies to ALL)' : 'Leave blank to keep same'}
+                placeholder={isBatch ? 'Leave blank to keep same (ALL)' : 'Leave blank to keep same'}
               />
             </Form.Group>
 
@@ -406,6 +440,22 @@ export default function Orders() {
     </Table>
   );
 
+  /* search view */
+  const filterBySymbol = (rows) => {
+    if (qTokens.length === 0) return rows;
+    return rows.filter((r) => {
+      const sym = String(r.symbol || '').toUpperCase();
+      return qTokens.every((t) => sym.includes(t.toUpperCase()));
+    });
+  };
+  const filtered = {
+    pending: filterBySymbol(orders.pending),
+    traded: filterBySymbol(orders.traded),
+    rejected: filterBySymbol(orders.rejected),
+    cancelled: filterBySymbol(orders.cancelled),
+    others: filterBySymbol(orders.others),
+  };
+
   return (
     <Card className="p-3 softCard">
       {/* Toolbar */}
@@ -444,8 +494,7 @@ export default function Orders() {
         <Tab eventKey="others" title="Others">{renderTable(filtered.others, 'others_table')}</Tab>
       </Tabs>
 
-      {renderModifyModal()}
-
+      {/* styles */}
       <style jsx global>{`
         .softCard { border: 1px solid #e6efff; box-shadow: 0 2px 12px rgba(13,110,253,.06); border-radius: 12px; }
         .searchGroup { min-width: 280px; max-width: 360px; }
