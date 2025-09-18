@@ -269,48 +269,63 @@ def router_refresh_symbols():
 @app.get("/search_symbols")
 def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
     """
-    Typeahead search.
-    Query params:
-      q        : free text (matches [Stock Symbol])
-      exchange : optional filter ("NSE", "BSE", etc.)
-    Returns: [{id: "NSE|SBIN|3045", text: "NSE | SBIN"}, ...]
+    Typeahead search with ranking:
+      1) exact symbol match
+      2) symbol startswith query
+      3) symbol contains query (anywhere)
     """
     _lazy_init_symbol_db()
-    query = (q or "").strip()
-    exch  = (exchange or "").strip().upper()
+    raw = (q or "").strip().lower()
+    exch = (exchange or "").strip().upper()
 
-    if not query:
+    if not raw:
         return {"results": []}
 
-    words = [w for w in query.lower().split() if w]
+    # keep your current AND-of-words filter to reduce result set
+    words = [w for w in raw.split() if w]
     if not words:
         return {"results": []}
 
-    where_sql, params = [], []
+    where_sql, where_params = [], []
     for w in words:
         where_sql.append('LOWER([Stock Symbol]) LIKE ?')
-        params.append(f"%{w}%")
+        where_params.append(f"%{w}%")
     if exch:
         where_sql.append('UPPER(Exchange) = ?')
-        params.append(exch)
+        where_params.append(exch)
+
+    # ranking params must appear first (they’re used in SELECT)
+    rank_params = [raw, f"{raw}%", f"%{raw}%"]
 
     sql = f"""
-        SELECT Exchange, [Stock Symbol], [Security ID]
+        SELECT
+            Exchange,
+            [Stock Symbol],
+            [Security ID],
+            CASE
+                WHEN LOWER([Stock Symbol]) = ?      THEN 0   -- exact
+                WHEN LOWER([Stock Symbol]) LIKE ?   THEN 1   -- prefix
+                WHEN LOWER([Stock Symbol]) LIKE ?   THEN 2   -- anywhere
+                ELSE 3
+            END AS rank_score
         FROM {SYMBOL_TABLE}
         WHERE {' AND '.join(where_sql)}
-        ORDER BY [Stock Symbol]
-        LIMIT 2000
+        ORDER BY rank_score, [Stock Symbol]
+        LIMIT 20
     """
 
     with _symbol_db_lock:
         conn = sqlite3.connect(SYMBOL_DB_PATH)
         try:
-            cur = conn.execute(sql, params)
+            cur = conn.execute(sql, rank_params + where_params)
             rows = cur.fetchall()
         finally:
             conn.close()
 
-    results = [{"id": f"{row[0]}|{row[1]}|{row[2]}", "text": f"{row[0]} | {row[1]}"} for row in rows]
+    results = [
+        {"id": f"{r[0]}|{r[1]}|{r[2]}", "text": f"{r[0]} | {r[1]}"}
+        for r in rows
+    ]
     return {"results": results}
 
 @app.on_event("startup")
@@ -1985,6 +2000,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
