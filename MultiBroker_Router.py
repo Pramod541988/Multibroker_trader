@@ -299,7 +299,7 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
         FROM {SYMBOL_TABLE}
         WHERE {' AND '.join(where_sql)}
         ORDER BY [Stock Symbol]
-        LIMIT 200
+        LIMIT 2000
     """
 
     with _symbol_db_lock:
@@ -1985,6 +1985,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
