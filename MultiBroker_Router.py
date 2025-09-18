@@ -270,18 +270,17 @@ def router_refresh_symbols():
 def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
     """
     Typeahead search with ranking:
-      1) exact symbol match
-      2) symbol startswith query
-      3) symbol contains query (anywhere)
+      0 = exact match on whole query
+      1 = symbol startswith whole query
+      2 = symbol contains whole query (anywhere)
     """
     _lazy_init_symbol_db()
     raw = (q or "").strip().lower()
     exch = (exchange or "").strip().upper()
-
     if not raw:
         return {"results": []}
 
-    # keep your current AND-of-words filter to reduce result set
+    # split into words for WHERE (AND-of-words)
     words = [w for w in raw.split() if w]
     if not words:
         return {"results": []}
@@ -294,7 +293,7 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
         where_sql.append('UPPER(Exchange) = ?')
         where_params.append(exch)
 
-    # ranking params must appear first (they’re used in SELECT)
+    # ranking based on full raw query (not just first word)
     rank_params = [raw, f"{raw}%", f"%{raw}%"]
 
     sql = f"""
@@ -303,15 +302,15 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
             [Stock Symbol],
             [Security ID],
             CASE
-                WHEN LOWER([Stock Symbol]) = ?      THEN 0   -- exact
-                WHEN LOWER([Stock Symbol]) LIKE ?   THEN 1   -- prefix
-                WHEN LOWER([Stock Symbol]) LIKE ?   THEN 2   -- anywhere
+                WHEN LOWER([Stock Symbol]) = ?     THEN 0
+                WHEN LOWER([Stock Symbol]) LIKE ?  THEN 1
+                WHEN LOWER([Stock Symbol]) LIKE ?  THEN 2
                 ELSE 3
             END AS rank_score
         FROM {SYMBOL_TABLE}
         WHERE {' AND '.join(where_sql)}
         ORDER BY rank_score, [Stock Symbol]
-        LIMIT 20
+        LIMIT 200
     """
 
     with _symbol_db_lock:
@@ -327,6 +326,7 @@ def router_search_symbols(q: str = Query(""), exchange: str = Query("")):
         for r in rows
     ]
     return {"results": results}
+
 
 @app.on_event("startup")
 def _symbols_startup():
@@ -2000,6 +2000,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
