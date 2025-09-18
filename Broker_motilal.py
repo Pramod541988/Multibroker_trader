@@ -645,10 +645,10 @@ def _map_ui_to_mo_type(ot: str | None, price, trig) -> str:
     m = {
         "LIMIT": "LIMIT",
         "MARKET": "MARKET",
-        "STOP_LOSS": "SL",
-        "STOPLOSS": "SL",
-        "SL": "SL",
-        "SL_LIMIT": "SL",
+        "STOP_LOSS": "STOPLOSS",
+        "STOPLOSS": "STOPLOSS",
+        "SL": "STOPLOSS",
+        "SL_LIMIT": "STOPLOSS",
         "STOP_LOSS_MARKET": "SL-M",
         "STOPLOSS_MARKET": "SL-M",
         "SL_MARKET": "SL-M",
@@ -687,54 +687,82 @@ def _load_mo_client_json_by_name(name: str) -> Dict[str, Any] | None:
 
 def _build_motilal_modify_payload(row: Dict[str, Any], clientcode: str) -> Dict[str, Any]:
     """
-    Build exactly the ModifiedOrderInfo the Motilal SDK expects.
-    All numeric fields are sent as numbers (int/float).
+    Build exactly what MO ModifyOrder expects.
+    - Only include fields that actually change.
+    - Omit newordertype if user didn’t choose and no price/trigger given
+      (so broker keeps existing type).
+    - All numbers stay numeric; no empty strings.
     """
-    def _i(x, default=0):
+    from datetime import datetime
+
+    def _i(x):
         try:
             s = str(x).strip()
-            if s == "": return default
+            if s == "": return None
             return int(float(s))
         except Exception:
-            return default
+            return None
 
-    def _f(x, default=0.0):
+    def _f(x):
         try:
             s = str(x).strip()
-            if s == "": return default
+            if s == "": return None
             return float(s)
         except Exception:
-            return default
+            return None
+
+    def _has_pos_num(x) -> bool:
+        try:
+            return (x is not None) and (float(x) > 0)
+        except Exception:
+            return False
 
     price = row.get("price")
     trig  = row.get("triggerPrice", row.get("triggerprice"))
+    qty   = row.get("quantity")
 
-    payload = {
-        "clientcode":          str(clientcode),
-        "uniqueorderid":       str(row.get("order_id") or row.get("orderId") or ""),
-        "newordertype":        _map_ui_to_mo_type(row.get("orderType"), price, trig),
-        "neworderduration":    str(row.get("validity") or "DAY").upper(),
-        "newquantityinlot":    _i(row.get("quantity"), 0),
-        "newdisclosedquantity": 0,                                # always 0, never ""
-        "newprice":            _f(price, 0.0),
-        "newtriggerprice":     _f(trig, 0.0),
-        "newgoodtilldate":     _i(row.get("goodtilldate"), 0),    # keep 0 unless you support GTD
-        "lastmodifiedtime":    datetime.now().strftime("%d-%b-%Y %H:%M:%S"),
-        "qtytradedtoday":      _i(row.get("qtytradedtoday"), 0),
+    # Decide type (may be "")
+    mo_type = _map_ui_to_mo_type(row.get("orderType"), price, trig)
+
+    payload: Dict[str, Any] = {
+        "clientcode":        str(clientcode),
+        "uniqueorderid":     str(row.get("order_id") or row.get("orderId") or ""),
+        "neworderduration":  str(row.get("validity") or "DAY").upper(),
+        "newdisclosedquantity": 0,
+        "lastmodifiedtime":  datetime.now().strftime("%d-%b-%Y %H:%M:%S"),
     }
+
+    # Conditionally include fields
+    if mo_type:  # only when explicit or inferred from price/trigger
+        payload["newordertype"] = mo_type
+
+    iq = _i(qty)
+    if iq and iq > 0:
+        payload["newquantityinlot"] = iq
+
+    fp = _f(price)
+    if _has_pos_num(fp):
+        payload["newprice"] = fp
+
+    ft = _f(trig)
+    if _has_pos_num(ft):
+        payload["newtriggerprice"] = ft
+
+    # GTD not used unless you wire it
+    # payload["newgoodtilldate"] = <int yyyymmdd>
     return payload
+
 
 def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Batch modify pending Motilal orders.
 
-    Input rows (from router): { name, order_id, orderType, price?, triggerPrice?, quantity?, validity? }
-    Output: { "message": [ "...", ... ] }
+    Input rows (from router): { name, order_id, orderType?, price?, triggerPrice?, quantity?, validity? }
+    Rules:
+      - If neither orderType nor price/trigger given -> we omit newordertype to preserve existing type.
+      - Validate only when a type is actually being changed/specified.
     """
     messages: List[str] = []
-
-    # Try to use a global/logged-in Mofsl session if present in this module.
-    mofsl = globals().get("Mofsl")
 
     for row in (orders or []):
         try:
@@ -754,19 +782,28 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 messages.append(f"❌ {name} ({oid}): missing clientcode")
                 continue
 
+            sdk = _ensure_session(cj)
+            if not sdk:
+                messages.append(f"❌ {name} ({oid}): session not available (login failed?)")
+                continue
+
             payload = _build_motilal_modify_payload(row, clientcode)
 
-            # Basic validations for explicit types (to avoid server-side reject)
-            ot = payload["newordertype"]
-            if ot == "LIMIT" and payload["newprice"] <= 0:
-                messages.append(f"❌ {name} ({oid}): LIMIT requires Price > 0")
-                continue
-            if ot == "SL" and (payload["newprice"] <= 0 or payload["newtriggerprice"] <= 0):
-                messages.append(f"❌ {name} ({oid}): SL requires Price & Trigger > 0")
-                continue
-            if ot == "SL-M" and payload["newtriggerprice"] <= 0:
-                messages.append(f"❌ {name} ({oid}): SL-M requires Trigger > 0")
-                continue
+            # If we’re not changing type, skip type-specific validations
+            ot = payload.get("newordertype", "")
+            if ot:
+                # hard validations only if user actually changes/specifies type
+                p  = payload.get("newprice", 0.0)
+                tp = payload.get("newtriggerprice", 0.0)
+                if ot == "LIMIT" and (not p or p <= 0):
+                    messages.append(f"❌ {name} ({oid}): LIMIT requires Price > 0")
+                    continue
+                if ot == "SL" and (not p or p <= 0 or not tp or tp <= 0):
+                    messages.append(f"❌ {name} ({oid}): SL requires Price & Trigger > 0")
+                    continue
+                if ot == "SL-M" and (not tp or tp <= 0):
+                    messages.append(f"❌ {name} ({oid}): SL-M requires Trigger > 0")
+                    continue
 
             # --- DEBUG OUT ---
             try:
@@ -775,11 +812,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             except Exception:
                 pass
 
-            if not mofsl or not hasattr(mofsl, "ModifyOrder"):
-                messages.append(f"❌ {name} ({oid}): Mofsl client not available (not logged in?)")
-                continue
-
-            resp = mofsl.ModifyOrder(payload)
+            resp = sdk.ModifyOrder(payload)
 
             # --- DEBUG RESP ---
             try:
@@ -788,34 +821,31 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             except Exception:
                 pass
 
-            # Heuristic success checks across common MO payloads
+            # Heuristic success
             ok = False
             err = ""
             if isinstance(resp, dict):
-                # success flags seen in various MO responses
                 status = str(resp.get("Status") or resp.get("status") or "").lower()
                 msg    = resp.get("Message") or resp.get("message") or resp.get("ErrorMsg") or resp.get("errorMessage")
                 code   = str(resp.get("ErrorCode") or resp.get("errorCode") or "")
                 ok = ("success" in status) or (resp.get("Success") is True) or code in ("0","200","201")
                 err = msg or code
             else:
-                # non-dict: treat truthy as success
                 ok = bool(resp)
                 err = "" if ok else str(resp)
 
-            if ok:
-                messages.append(f"✅ {name} ({oid}): Modified")
-            else:
-                messages.append(f"❌ {name} ({oid}): {err or 'modify failed'}")
+            messages.append(f"{'✅' if ok else '❌'} {name} ({oid}): {'Modified' if ok else (err or 'modify failed')}")
 
         except Exception as e:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
 
+
 # Optional single-item convenience (not required by router)
 def modify_order(order: Dict[str, Any]) -> Dict[str, Any]:
     return modify_orders([order])
+
 
 
 
