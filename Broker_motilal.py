@@ -671,10 +671,10 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         m = {
             "LIMIT": "LIMIT",
             "MARKET": "MARKET",
-            "STOP_LOSS": "SL",
-            "STOPLOSS": "SL",
-            "SL_LIMIT": "SL",
-            "SL": "SL",
+            "STOP_LOSS": "STOPLOSS",
+            "STOPLOSS": "STOPLOSS",
+            "SL_LIMIT": "STOPLOSS",
+            "SL": "STOPLOSS",
             "STOP_LOSS_MARKET": "SL-M",
             "STOPLOSS_MARKET": "SL-M",
             "SL_MARKET": "SL-M",
@@ -814,6 +814,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
