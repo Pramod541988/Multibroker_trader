@@ -22,6 +22,7 @@ _sessions: Dict[str, MOFSLOPENAPI] = {}
 
 DATA_DIR    = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
 CLIENTS_DIR = os.path.join(DATA_DIR, "clients", "motilal")
+_MO_DIR     = CLIENTS_DIR
 
 def _read_clients() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
@@ -813,6 +814,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
