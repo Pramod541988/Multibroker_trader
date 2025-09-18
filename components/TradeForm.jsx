@@ -213,25 +213,18 @@ export default function TradeForm() {
             <Col xs="auto" className="d-flex align-items-center flex-wrap gap-3">
               <Form.Label className="mb-0 fw-semibold">Action</Form.Label>
 
-              <Form.Check
-                inline
-                type="radio"
-                name="action"
-                id="buy"
-                label="BUY"
-                checked={action === 'buy'}
-                onChange={() => setAction('buy')}
-              />
-
-              <Form.Check
-                inline
-                type="radio"
-                name="action"
-                id="sell"
-                label="SELL"
-                checked={action === 'sell'}
-                onChange={() => setAction('sell')}
-              />
+              {['buy','sell'].map(v => (
+                <Form.Check
+                  key={v}
+                  inline
+                  type="radio"
+                  name="action"
+                  id={`action_${v}`}
+                  label={v.toUpperCase()}
+                  checked={action === v}
+                  onChange={() => setAction(v)}
+                />
+              ))}
             </Col>
           </Row>
         </div>
@@ -241,11 +234,21 @@ export default function TradeForm() {
           <Row className="g-2 align-items-center">
             <Col xs="auto" className="d-flex align-items-center flex-wrap gap-3">
               <Form.Label className="mb-0 fw-semibold">Product</Form.Label>
-              {['VALUEPLUS','DELIVERY','NORMAL','SELLFROMDP','BTST','MTF'].map(pt => (
-                <Form.Check key={pt} inline type="radio" name="productType"
-                  label={pt==='VALUEPLUS' ? 'INTRADAY' : pt}
-                  checked={productType===pt} onChange={()=>setProductType(pt)} />
-              ))}
+              {['VALUEPLUS','DELIVERY','NORMAL','SELLFROMDP','BTST','MTF'].map(pt => {
+                const label = pt === 'VALUEPLUS' ? 'INTRADAY' : pt;
+                return (
+                  <Form.Check
+                    key={pt}
+                    inline
+                    type="radio"
+                    name="productType"
+                    id={`product_${pt.toLowerCase().replace(/\s+/g, '_')}`}
+                    label={label}
+                    checked={productType === pt}
+                    onChange={() => setProductType(pt)}
+                  />
+                );
+              })}
             </Col>
           </Row>
         </div>
@@ -255,11 +258,22 @@ export default function TradeForm() {
           <Row className="g-2 align-items-center">
             <Col xs="auto" className="d-flex align-items-center flex-wrap gap-3">
               <Form.Label className="mb-0 fw-semibold">Order Type</Form.Label>
-              {['LIMIT','MARKET','STOPLOSS','SL MARKET'].map(ot => (
-                <Form.Check key={ot} inline type="radio" name="orderType"
-                  label={ot.replace('SL MARKET','SL_MARKET')}
-                  checked={orderType===ot} onChange={()=>setOrderType(ot)} />
-              ))}
+              {['LIMIT','MARKET','STOPLOSS','SL MARKET'].map(ot => {
+                const idKey = ot.toLowerCase().replace(/\s+/g, '_'); // sl_market
+                const label = ot.replace('SL MARKET', 'SL_MARKET');
+                return (
+                  <Form.Check
+                    key={ot}
+                    inline
+                    type="radio"
+                    name="orderType"
+                    id={`ordertype_${idKey}`}
+                    label={label}
+                    checked={orderType === ot}
+                    onChange={() => setOrderType(ot)}
+                  />
+                );
+              })}
             </Col>
           </Row>
         </div>
@@ -296,6 +310,7 @@ export default function TradeForm() {
                           key={g.group_name}
                           type="checkbox"
                           id={`group_${g.group_name}`}
+                          name="groupsPick"
                           label={`${g.group_name} (${g.no_of_clients} clients, x${g.multiplier})`}
                           checked={selectedGroups.includes(g.group_name)}
                           onChange={e=>{
@@ -332,20 +347,55 @@ export default function TradeForm() {
             <Col md={7}>
               <div className="d-flex align-items-center flex-wrap gap-3 mb-1">
                 <Form.Label className="mb-0 fw-semibold">Entity</Form.Label>
-                <Form.Check inline type="checkbox" id="groupAcc" label="Group Acc"
-                  checked={groupAcc} onChange={e=>setGroupAcc(e.target.checked)} />
-                <Form.Check inline type="checkbox" id="diffQty" label="Diff. Qty."
-                  checked={diffQty} onChange={e=>setDiffQty(e.target.checked)} />
-                <Form.Check inline type="checkbox" id="multiplier" label="Multiplier"
-                  checked={multiplier} onChange={e=>setMultiplier(e.target.checked)} />
+                <Form.Check
+                  inline
+                  type="checkbox"
+                  id="entity_groupAcc"
+                  name="entity_groupAcc"
+                  label="Group Acc"
+                  checked={groupAcc}
+                  onChange={e=>setGroupAcc(e.target.checked)}
+                />
+                <Form.Check
+                  inline
+                  type="checkbox"
+                  id="entity_diffQty"
+                  name="entity_diffQty"
+                  label="Diff. Qty."
+                  checked={diffQty}
+                  onChange={e=>setDiffQty(e.target.checked)}
+                />
+                <Form.Check
+                  inline
+                  type="checkbox"
+                  id="entity_multiplier"
+                  name="entity_multiplier"
+                  label="Multiplier"
+                  checked={multiplier}
+                  onChange={e=>setMultiplier(e.target.checked)}
+                />
               </div>
 
               <div className="d-flex align-items-center flex-wrap gap-3">
                 <Form.Label className="mb-0 fw-semibold">Qty Mode</Form.Label>
-                <Form.Check inline type="radio" name="qtySel" label="Manual"
-                  checked={qtySelection==='manual'} onChange={()=>setQtySelection('manual')} />
-                <Form.Check inline type="radio" name="qtySel" label="Auto Calculate"
-                  checked={qtySelection==='auto'} onChange={()=>setQtySelection('auto')} />
+                <Form.Check
+                  inline
+                  type="radio"
+                  name="qtySel"
+                  id="qtySel_manual"
+                  label="Manual"
+                  checked={qtySelection==='manual'}
+                  onChange={()=>setQtySelection('manual')}
+                />
+                <Form.Check
+                  inline
+                  type="radio"
+                  name="qtySel"
+                  id="qtySel_auto"
+                  label="Auto Calculate"
+                  checked={qtySelection==='auto'}
+                  onChange={()=>setQtySelection('auto')}
+                />
               </div>
             </Col>
           </Row>
@@ -417,11 +467,26 @@ export default function TradeForm() {
             <Col md="auto" className="d-flex align-items-center flex-wrap gap-3">
               <Form.Label className="mb-0">Order Duration</Form.Label>
               {['DAY','IOC'].map(tf => (
-                <Form.Check key={tf} inline type="radio" name="timeForce"
-                  label={tf} checked={timeForce===tf} onChange={()=>setTimeForce(tf)} />
+                <Form.Check
+                  key={tf}
+                  inline
+                  type="radio"
+                  name="timeForce"
+                  id={`timeForce_${tf}`}
+                  label={tf}
+                  checked={timeForce===tf}
+                  onChange={()=>setTimeForce(tf)}
+                />
               ))}
-              <Form.Check inline type="checkbox" id="amo" label="AMO Order"
-                checked={amo} onChange={e=>setAmo(e.target.checked)} />
+              <Form.Check
+                inline
+                type="checkbox"
+                id="amo_order"
+                name="amo_order"
+                label="AMO Order"
+                checked={amo}
+                onChange={e=>setAmo(e.target.checked)}
+              />
             </Col>
           </Row>
         </div>
