@@ -618,153 +618,116 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     return {"status": "completed", "order_responses": responses}
 
-# --- Motilal: batch order modify ------------------------------------
-from typing import Dict, Any, List
-from datetime import datetime
-import os, json
-
-# Where the client JSONs live (same convention as your router)
-_BASE_DIR = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
-_MO_DIR   = os.path.join(_BASE_DIR, "clients", "motilal")
-
-def _map_ui_to_mo_type(ot: str | None, price, trig) -> str:
+# --- Motilal: modify_orders with rich logging (drop-in) -----------------------
+def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Map UI/Router order type to Motilal codes.
-    Fallback: infer from presence of price/trigger.
+    LOG-FIRST version: print everything so we can verify the flow.
+    - Prints the full 'orders' list received from router
+    - For each order: prints the inbound row, the final payload OUT, and raw RESP
     """
-    def _has(x):
+    import json
+    from datetime import datetime
+
+    messages: List[str] = []
+
+    # 0) Full dump of what router sent us
+    try:
+        print("==== [MO][MODIFY] INBOUND (from router) ====", flush=True)
+        print(json.dumps(orders, indent=2, default=str), flush=True)
+    except Exception:
+        print("==== [MO][MODIFY] INBOUND: <unprintable> ====", flush=True)
+
+    def _num_i(x, default=0):
+        try:
+            s = str(x).strip()
+            if s == "": return default
+            return int(float(s))
+        except Exception:
+            return default
+
+    def _num_f(x, default=0.0):
+        try:
+            s = str(x).strip()
+            if s == "": return default
+            return float(s)
+        except Exception:
+            return default
+
+    def _has(x) -> bool:
         if x is None: return False
-        s = str(x).strip()
+        try:
+            s = str(x).strip()
+        except Exception:
+            return True
         if s == "": return False
         try:
-            return float(s) > 0
+            return float(s) != 0
         except Exception:
             return True
 
-    u = (ot or "").strip().upper().replace("-", "_")
-    m = {
-        "LIMIT": "LIMIT",
-        "MARKET": "MARKET",
-        "STOP_LOSS": "STOPLOSS",
-        "STOPLOSS": "STOPLOSS",
-        "SL": "STOPLOSS",
-        "SL_LIMIT": "STOPLOSS",
-        "STOP_LOSS_MARKET": "SL-M",
-        "STOPLOSS_MARKET": "SL-M",
-        "SL_MARKET": "SL-M",
-        "NO_CHANGE": "",
-        "": "",
-    }
-    mapped = m.get(u, "")
-    if mapped:
-        return mapped
-    # infer
-    has_p = _has(price)
-    has_t = _has(trig)
-    if has_t and has_p:   return "SL"     # SL-limit
-    if has_t and not has_p: return "SL-M" # SL-market
-    if has_p and not has_t: return "LIMIT"
-    return "MARKET"
+    def _map_ui_to_mo_type(ot: str | None, price, trig) -> str:
+        u = (ot or "").strip().upper().replace("-", "_")
+        m = {
+            "LIMIT": "LIMIT",
+            "MARKET": "MARKET",
+            "STOP_LOSS": "SL",
+            "STOPLOSS": "SL",
+            "SL_LIMIT": "SL",
+            "SL": "SL",
+            "STOP_LOSS_MARKET": "SL-M",
+            "STOPLOSS_MARKET": "SL-M",
+            "SL_MARKET": "SL-M",
+            "NO_CHANGE": "",
+            "": "",
+        }
+        mapped = m.get(u, "")
+        if mapped:
+            return mapped
+        # infer from values if UI said NO_CHANGE
+        has_p = _has(price); has_t = _has(trig)
+        if has_t and has_p:   return "SL"
+        if has_t and not has_p: return "SL-M"
+        if has_p and not has_t: return "LIMIT"
+        return "MARKET"
 
-def _load_mo_client_json_by_name(name: str) -> Dict[str, Any] | None:
-    """Find a Motilal client json by human name (case-insensitive)."""
-    needle = (name or "").strip().lower()
-    try:
-        for fn in os.listdir(_MO_DIR):
-            if not fn.endswith(".json"):
-                continue
-            path = os.path.join(_MO_DIR, fn)
-            with open(path, "r", encoding="utf-8") as f:
-                cj = json.load(f)
-            nm = (cj.get("name") or cj.get("display_name") or "").strip().lower()
-            if nm == needle:
-                return cj
-    except FileNotFoundError:
-        return None
-    except Exception:
-        return None
-    return None
-
-def _build_motilal_modify_payload(row: Dict[str, Any], clientcode: str) -> Dict[str, Any]:
-    """
-    Build exactly what MO ModifyOrder expects.
-    - Only include fields that actually change.
-    - Omit newordertype if user didn’t choose and no price/trigger given
-      (so broker keeps existing type).
-    - All numbers stay numeric; no empty strings.
-    """
-    from datetime import datetime
-
-    def _i(x):
+    def _load_mo_client_json_by_name(name: str) -> Dict[str, Any] | None:
+        needle = (name or "").strip().lower()
         try:
-            s = str(x).strip()
-            if s == "": return None
-            return int(float(s))
+            for fn in os.listdir(_MO_DIR):
+                if not fn.endswith(".json"):
+                    continue
+                path = os.path.join(_MO_DIR, fn)
+                with open(path, "r", encoding="utf-8") as f:
+                    cj = json.load(f)
+                nm = (cj.get("name") or cj.get("display_name") or "").strip().lower()
+                if nm == needle:
+                    return cj
+        except FileNotFoundError:
+            return None
         except Exception:
             return None
+        return None
 
-    def _f(x):
+    def _fetch_order_snapshot(sdk, clientcode: str, uniqueorderid: str) -> dict | None:
         try:
-            s = str(x).strip()
-            if s == "": return None
-            return float(s)
+            ts = datetime.now().strftime("%d-%b-%Y 09:00:00")
+            ob = sdk.GetOrderBook({"clientcode": clientcode, "datetimestamp": ts})
+            rows = ob.get("data", []) if isinstance(ob, dict) else []
+            for r in rows or []:
+                if str(r.get("uniqueorderid") or "") == str(uniqueorderid):
+                    return r
         except Exception:
-            return None
-
-    def _has_pos_num(x) -> bool:
-        try:
-            return (x is not None) and (float(x) > 0)
-        except Exception:
-            return False
-
-    price = row.get("price")
-    trig  = row.get("triggerPrice", row.get("triggerprice"))
-    qty   = row.get("quantity")
-
-    # Decide type (may be "")
-    mo_type = _map_ui_to_mo_type(row.get("orderType"), price, trig)
-
-    payload: Dict[str, Any] = {
-        "clientcode":        str(clientcode),
-        "uniqueorderid":     str(row.get("order_id") or row.get("orderId") or ""),
-        "neworderduration":  str(row.get("validity") or "DAY").upper(),
-        "newdisclosedquantity": 0,
-        "lastmodifiedtime":  datetime.now().strftime("%d-%b-%Y %H:%M:%S"),
-    }
-
-    # Conditionally include fields
-    if mo_type:  # only when explicit or inferred from price/trigger
-        payload["newordertype"] = mo_type
-
-    iq = _i(qty)
-    if iq and iq > 0:
-        payload["newquantityinlot"] = iq
-
-    fp = _f(price)
-    if _has_pos_num(fp):
-        payload["newprice"] = fp
-
-    ft = _f(trig)
-    if _has_pos_num(ft):
-        payload["newtriggerprice"] = ft
-
-    # GTD not used unless you wire it
-    # payload["newgoodtilldate"] = <int yyyymmdd>
-    return payload
-
-
-def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Batch modify pending Motilal orders.
-
-    Input rows (from router): { name, order_id, orderType?, price?, triggerPrice?, quantity?, validity? }
-    Rules:
-      - If neither orderType nor price/trigger given -> we omit newordertype to preserve existing type.
-      - Validate only when a type is actually being changed/specified.
-    """
-    messages: List[str] = []
+            pass
+        return None
 
     for row in (orders or []):
+        # 1) Per-row: show exactly what we got from router
+        try:
+            print("\n---- [MO][MODIFY] ROW (router) ----", flush=True)
+            print(json.dumps(row, indent=2, default=str), flush=True)
+        except Exception:
+            print("\n---- [MO][MODIFY] ROW: <unprintable> ----", flush=True)
+
         try:
             name = (row.get("name") or "").strip() or "<unknown>"
             oid  = str(row.get("order_id") or row.get("orderId") or "").strip()
@@ -777,51 +740,61 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 messages.append(f"❌ {name} ({oid}): client JSON not found")
                 continue
 
-            clientcode = str(cj.get("userid") or cj.get("client_id") or "").strip()
-            if not clientcode:
-                messages.append(f"❌ {name} ({oid}): missing clientcode")
-                continue
-
+            uid = str(cj.get("userid") or cj.get("client_id") or "").strip()
             sdk = _ensure_session(cj)
-            if not sdk:
-                messages.append(f"❌ {name} ({oid}): session not available (login failed?)")
+            if not (uid and sdk):
+                messages.append(f"❌ {name} ({oid}): session not available")
                 continue
 
-            payload = _build_motilal_modify_payload(row, clientcode)
+            price = row.get("price")
+            trig  = row.get("triggerPrice", row.get("triggerprice"))
+            qty_in = row.get("quantity")
 
-            # If we’re not changing type, skip type-specific validations
-            ot = payload.get("newordertype", "")
-            if ot:
-                # hard validations only if user actually changes/specifies type
-                p  = payload.get("newprice", 0.0)
-                tp = payload.get("newtriggerprice", 0.0)
-                if ot == "LIMIT" and (not p or p <= 0):
-                    messages.append(f"❌ {name} ({oid}): LIMIT requires Price > 0")
-                    continue
-                if ot == "SL" and (not p or p <= 0 or not tp or tp <= 0):
-                    messages.append(f"❌ {name} ({oid}): SL requires Price & Trigger > 0")
-                    continue
-                if ot == "SL-M" and (not tp or tp <= 0):
-                    messages.append(f"❌ {name} ({oid}): SL-M requires Trigger > 0")
-                    continue
+            # Snapshot only to backfill defaults (no behavior change)
+            snap = _fetch_order_snapshot(sdk, uid, oid) or {}
 
-            # --- DEBUG OUT ---
+            new_type = _map_ui_to_mo_type(row.get("orderType"), price, trig)
+            new_qty  = _num_i(qty_in, _num_i(snap.get("orderqty"), 0))
+            new_pr   = _num_f(price, 0.0)
+            new_tr   = _num_f(trig, 0.0)
+
+            payload = {
+                "clientcode": uid,
+                "uniqueorderid": oid,
+                "newordertype": new_type,
+                "neworderduration": str(row.get("validity") or "DAY").upper(),
+                "newquantityinlot": new_qty,
+                "newdisclosedquantity": 0,
+                "newprice": new_pr,
+                "newtriggerprice": new_tr,
+                "newgoodtilldate": 0,
+                "lastmodifiedtime": datetime.now().strftime("%d-%b-%Y %H:%M:%S"),
+                "qtytradedtoday": _num_i(snap.get("qtytradedtoday"), 0),
+            }
+
+            # Drop “no change” numerics so the API won’t choke on zeros
+            if payload["newprice"] <= 0:         payload.pop("newprice")
+            if payload["newtriggerprice"] <= 0:  payload.pop("newtriggerprice")
+            if payload["newquantityinlot"] <= 0: payload.pop("newquantityinlot")
+
+            # 2) Show the exact payload we are sending to API
             try:
-                print("---- Motilal ModifyOrder (OUT) ----")
-                print(json.dumps(payload, indent=2))
+                print("---- [MO][MODIFY] OUT (payload to SDK.ModifyOrder) ----", flush=True)
+                print(json.dumps(payload, indent=2, default=str), flush=True)
             except Exception:
-                pass
+                print("---- [MO][MODIFY] OUT: <unprintable payload> ----", flush=True)
 
+            # Call SDK
             resp = sdk.ModifyOrder(payload)
 
-            # --- DEBUG RESP ---
+            # 3) Show the raw response from SDK/server
             try:
-                print("---- Motilal ModifyOrder (RESP) ----")
-                print(json.dumps(resp if isinstance(resp, dict) else {"raw": resp}, indent=2))
+                print("---- [MO][MODIFY] RESP (raw) ----", flush=True)
+                print(json.dumps(resp if isinstance(resp, dict) else {"raw": resp}, indent=2, default=str), flush=True)
             except Exception:
-                pass
+                print("---- [MO][MODIFY] RESP: <unprintable response> ----", flush=True)
 
-            # Heuristic success
+            # Keep the “message” formatting same as before so UI works
             ok = False
             err = ""
             if isinstance(resp, dict):
@@ -842,9 +815,6 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"message": messages}
 
 
-# Optional single-item convenience (not required by router)
-def modify_order(order: Dict[str, Any]) -> Dict[str, Any]:
-    return modify_orders([order])
 
 
 
