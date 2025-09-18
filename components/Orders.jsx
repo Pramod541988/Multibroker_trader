@@ -101,7 +101,7 @@ export default function Orders() {
   const timerRef = useRef(null);
   const abortRef = useRef(null);
 
-  // dedicated modal container to avoid portal issues
+  // dedicated modal container (prevents portal issues)
   const modalContainerRef = useRef(null);
   useEffect(() => {
     if (typeof document !== 'undefined') {
@@ -113,6 +113,7 @@ export default function Orders() {
     }
   }, []);
 
+  /* ===== fetch ===== */
   const fetchAll = async () => {
     if (busyRef.current) return;
     if (typeof document !== 'undefined' && document.hidden) return;
@@ -155,9 +156,11 @@ export default function Orders() {
   }, []);
 
   /* ========= helpers ========= */
-  const rowKey = (row) => String(row.order_id ?? `${row.name ?? ''}|${row.symbol ?? ''}|${row.status ?? ''}`);
+  const rowKey = (row) =>
+    String(row.order_id ?? `${row.name ?? ''}|${row.symbol ?? ''}|${row.status ?? ''}`);
 
-  const toggle = (rowId) => setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
+  const toggle = (rowId) =>
+    setSelectedIds((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
 
   // always read from full pending list (not filtered / not DOM)
   const getSelectedPending = () => {
@@ -171,6 +174,9 @@ export default function Orders() {
           price: row.price ?? '',
           order_id: row.order_id ?? '',
           status: row.status ?? '',
+          // capture broker/client if present in your payload
+          broker: row.broker ?? row.broker_name ?? row.vendor ?? row.gateway ?? null,
+          client_id: row.client_id ?? row.clientId ?? row.client ?? null,
         });
       }
     });
@@ -181,6 +187,8 @@ export default function Orders() {
   const cancelSelected = async () => {
     const selectedOrders = getSelectedPending().map((o) => ({
       name: o.name, symbol: o.symbol, order_id: o.order_id,
+      ...(o.client_id ? { client_id: o.client_id } : {}),
+      ...(o.broker ? { broker: o.broker } : {}),
     }));
     if (selectedOrders.length === 0) return alert('No orders selected.');
 
@@ -264,12 +272,20 @@ export default function Orders() {
     busyRef.current = true;
 
     try {
+      // one POST per order, explicitly tagged with broker & client_id when available
       const requests = modifyTarget.orders.map((o) => {
-        const payload = { name: o.name, symbol: o.symbol, order_id: o.order_id };
+        const payload = {
+          name: o.name,
+          symbol: o.symbol,
+          order_id: o.order_id,
+          ...(o.client_id ? { client_id: o.client_id } : {}),
+          ...(o.broker ? { broker: o.broker } : {}),
+        };
         if (modType !== 'NO_CHANGE') payload.ordertype = need.canon;
         if (modQty !== '') payload.quantity = qtyNum;
         if (modPrice !== '') payload.price = priceNum;
         if (modTrig !== '') payload.triggerprice = trigNum;
+
         return api.post('/modify_order', { order: payload });
       });
 
@@ -471,7 +487,7 @@ export default function Orders() {
         <Button variant="warning" onClick={openModify}>Modify Order</Button>
         <Button variant="danger" onClick={cancelSelected}>Cancel Order</Button>
 
-        {/* Live selection count for quick sanity check */}
+        {/* quick sanity: selection count */}
         <Badge bg="info" className="ms-1">{Object.values(selectedIds).filter(Boolean).length} selected</Badge>
 
         {/* Search by Symbol */}
