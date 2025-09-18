@@ -1,4 +1,4 @@
-// TradeForm.jsx — stable radios, proper order-type values, basic validation
+// components/TradeForm.jsx — stable radios, canonical order types, validations
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
@@ -16,7 +16,7 @@ const toIntOr = (v, fallback = 1) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-// canonical ui order types (value === what backend expects)
+// canonical values (what backend expects)
 const ORDER_TYPES = [
   { value: 'LIMIT', label: 'LIMIT' },
   { value: 'MARKET', label: 'MARKET' },
@@ -48,7 +48,7 @@ export default function TradeForm() {
 
   const [qty, setQty] = useState('1');
   const [exchange, setExchange] = useState('NSE');
-  const [symbol, setSymbol] = useState(null); // { value: 'TOKEN|SYMBOL', label: 'NSE | PNB EQ' }
+  const [symbol, setSymbol] = useState(null); // { value, label }
   const [price, setPrice] = useState(0);
   const [trigPrice, setTrigPrice] = useState(0);
   const [disclosedQty, setDisclosedQty] = useState(0);
@@ -140,8 +140,7 @@ export default function TradeForm() {
     const res = await api.get('/search_symbols', { params: { q: inputValue, exchange } });
     const results = res.data?.results || [];
     return results.map(r => ({
-      // keep a stable machine-readable value (prefer token/security_id if present)
-      value: r.id ?? r.token ?? r.symbol ?? r.text,
+      value: r.id ?? r.token ?? r.symbol ?? r.text, // stable machine value
       label: r.text ?? r.label ?? String(r.id),
     }));
   };
@@ -167,8 +166,7 @@ export default function TradeForm() {
       return 'Please select a symbol from the dropdown.';
     }
     if (orderType === 'MARKET' && Number(price) !== 0) {
-      // normalize silently: market orders should not carry a price
-      setPrice(0);
+      setPrice(0); // normalize silently
     }
     if (isStopOrder && Number(trigPrice) <= 0) {
       return 'Trigger price is required for STOPLOSS / SL_MARKET orders.';
@@ -203,11 +201,11 @@ export default function TradeForm() {
         groupacc: groupAcc,
         groups: selectedGroups,
         clients: selectedClients,
-        action,                                              // already BUY/SELL
+        action,                                              // BUY/SELL
         ordertype: orderType,                                // LIMIT/MARKET/STOPLOSS/SL_MARKET
         producttype: productType,                            // canonical
         orderduration: timeForce,                            // DAY/IOC
-        exchange,                                            // e.g., NSE / NSEFO
+        exchange,                                            // e.g., NSE/NSEFO
         symbol: symbol?.value || '',                         // machine value
         price: Number(price) || 0,
         triggerprice: Number(trigPrice) || 0,
@@ -461,4 +459,118 @@ export default function TradeForm() {
                 cacheOptions
                 defaultOptions={false}
                 loadOptions={loadSymbolOptions}
-                val
+                value={symbol}
+                onChange={setSymbol}
+                placeholder="Type to search symbol..."
+              />
+            </Col>
+          </Row>
+
+          {/* Price / Trigger / Disclosed */}
+          <Row className="g-2 align-items-end">
+            <Col md={5}>
+              <Form.Label className="label-tight">Price</Form.Label>
+              <Form.Control
+                type="number"
+                step="0.01"
+                value={orderType === 'MARKET' ? 0 : price}
+                disabled={orderType === 'MARKET'}
+                onChange={e=>setPrice(e.target.value)}
+              />
+            </Col>
+
+            <Col md={7}>
+              <Row className="g-2">
+                <Col md={6}>
+                  <Form.Label className="label-tight">Trig. Price</Form.Label>
+                  <Form.Control
+                    type="number"
+                    step="0.01"
+                    value={trigPrice}
+                    onChange={e=>setTrigPrice(e.target.value)}
+                    disabled={!isStopOrder}
+                  />
+                </Col>
+                <Col md={6}>
+                  <Form.Label className="label-tight">Disclosed Qty</Form.Label>
+                  <Form.Control
+                    type="number"
+                    value={disclosedQty}
+                    onChange={e=>setDisclosedQty(e.target.value)}
+                  />
+                </Col>
+              </Row>
+            </Col>
+          </Row>
+        </div>
+
+        {/* Duration */}
+        <div className="formSection">
+          <Row className="g-2 align-items-center">
+            <Col md="auto" className="d-flex align-items-center flex-wrap gap-3">
+              <Form.Label className="mb-0">Order Duration</Form.Label>
+              {['DAY','IOC'].map(tf => (
+                <Form.Check
+                  key={tf}
+                  inline
+                  type="radio"
+                  name="timeForce"
+                  id={`timeForce_${tf}`}
+                  label={tf}
+                  checked={timeForce===tf}
+                  onChange={()=>setTimeForce(tf)}
+                />
+              ))}
+              <Form.Check
+                inline
+                type="checkbox"
+                id="amo_order"
+                name="amo_order"
+                label="AMO Order"
+                checked={amo}
+                onChange={e=>setAmo(e.target.checked)}
+              />
+            </Col>
+          </Row>
+        </div>
+
+        {/* Buttons */}
+        <Row className="mt-2">
+          <Col className="text-start">
+            <div className="btn-nudge">
+              <Button type="submit" variant={action === 'BUY' ? 'success' : 'danger'} disabled={busy}>
+                {busy ? <Spinner size="sm" animation="border" className="me-2" /> : null}
+                {action}
+              </Button>{' '}
+              <Button type="button" variant="secondary" onClick={resetAll}>
+                Reset
+              </Button>
+            </div>
+          </Col>
+        </Row>
+
+        {toast && (
+          <Alert variant={toast.variant} onClose={()=>setToast(null)} dismissible className="mt-3">
+            {toast.text}
+          </Alert>
+        )}
+      </Form>
+
+      <style jsx>{`
+        .cardPad { padding: 1rem 2.5rem 2.75rem; }
+        @media (min-width: 992px) { .cardPad { padding: 1.25rem 2.75rem 3.25rem; } }
+        .blueTone {
+          background: linear-gradient(180deg, #f9fbff 0%, #f3f7ff 100%);
+          border: 1px solid #d5e6ff;
+          box-shadow: 0 0 0 6px rgba(49, 132, 253, 0.12);
+          border-radius: 8px;
+        }
+        .formSection { padding-block: 6px; margin: 0 16px 8px; border-bottom: 1px dashed #d7e3ff; }
+        .formSection:last-of-type { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+        .label-tight { margin-bottom: 4px; }
+        :global(input[type="radio"]), :global(input[type="checkbox"]) { accent-color: #0d6efd; }
+        .btn-nudge { margin-left: 3rem; padding-bottom: 0.25rem; }
+      `}</style>
+    </Card>
+  );
+}
