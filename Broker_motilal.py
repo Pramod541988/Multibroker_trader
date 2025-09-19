@@ -3,6 +3,11 @@ from typing import Dict, Any, List
 from datetime import datetime
 from collections import OrderedDict
 import threading
+from datetime import datetime, timedelta, timezone
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist_str() -> str:
+    return datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S")
 
 
 try:
@@ -797,7 +802,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "newordertype": ui_type or "MARKET",             # always present
                 "neworderduration": str(row.get("validity") or "DAY").upper(),
                 "newdisclosedquantity": 0,
-                "lastmodifiedtime": datetime.now().strftime("%d-%b-%Y %H:%M:%S"),
+                "lastmodifiedtime": now_ist_str(),
                 "newquantityinlot": lots,                        # MO expects LOTS
             }
             if _pos(_num_f(price_in)): payload["newprice"] = float(price_in)
@@ -849,28 +854,6 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
