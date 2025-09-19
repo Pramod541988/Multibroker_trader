@@ -24,6 +24,10 @@ DATA_DIR    = os.path.abspath(os.environ.get("DATA_DIR", "./data"))
 CLIENTS_DIR = os.path.join(DATA_DIR, "clients", "motilal")
 _MO_DIR     = CLIENTS_DIR
 
+# Path to symbols.db built by MultiBroker_Router.refresh_symbols()
+SQLITE_DB = os.path.join(DATA_DIR, "symbols.db")
+
+
 def _read_clients() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     try:
@@ -619,20 +623,21 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     return {"status": "completed", "order_responses": responses}
 
-# --- Motilal: modify_orders (always include newordertype) ---
 def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Adds `newordertype` to payload for MO ModifyOrder.
-    - Maps UI types -> MO types: LIMIT, MARKET, STOPLOSS, SL-M
-    - If UI says NO_CHANGE/blank, pulls type from current order snapshot.
-    - Quantity sent in SHARES from router; converts to LOTS via min-qty map.
+    Motilal ModifyOrder (robust):
+      • Always includes `newordertype`.
+      • If UI selects NO_CHANGE, derive type from the live order snapshot.
+      • Router sends quantity in SHARES; convert to LOTS via min-qty from SQLite symbols.db.
+      • Validates required fields per type (LIMIT / STOPLOSS / SL-M).
+      • Prints IN row, OUT payload, RESP for easy Railway log debugging.
     """
     import json, os, sqlite3
     from datetime import datetime
 
     messages: List[str] = []
 
-    # ---- helpers ----
+    # ---------- small utils ----------
     def _num_i(x, default=None):
         try:
             s = str(x).strip()
@@ -655,30 +660,45 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         except Exception:
             return False
 
+    # Map UI radio to MO enum
     def _ui_to_mo(ot: str | None) -> str:
-        """Map UI value to MO enum."""
-        u = (ot or "").strip().upper().replace("-", "_")
+        u = (ot or "").strip().upper().replace("-", "_").replace(" ", "_")
         m = {
             "LIMIT": "LIMIT",
             "MARKET": "MARKET",
             "STOP_LOSS": "STOPLOSS",
             "STOPLOSS": "STOPLOSS",
-            "SL_LIMIT": "STOPLOSS",
+            "SL_LIMIT": "STOPLOSS",           # SL-L
             "SL": "STOPLOSS",
             "STOP_LOSS_MARKET": "SL-M",
             "STOPLOSS_MARKET": "SL-M",
-            "SL_MARKET": "SL-M",
+            "SL_MARKET": "SL-M",              # SL-M
         }
-        return m.get(u, "")  # "" means unknown/NO_CHANGE
+        return m.get(u, "")  # "" → NO_CHANGE / unknown
 
+    # Normalize strings coming from snapshot to MO enum
     def _snap_to_mo(ot: str | None) -> str:
-        """Normalize snapshot string to MO enum."""
-        u = (ot or "").strip().upper().replace("-", "_")
-        if u in ("SL_LIMIT", "SL_L"): return "STOPLOSS"
-        if u in ("SL_MARKET", "SL_M"): return "SL-M"
+        u = (ot or "").strip().upper().replace("-", "_").replace(" ", "_")
+        if u in ("SL_LIMIT", "SL_L", "STOPLOSS_LIMIT"): return "STOPLOSS"
+        if u in ("SL_MARKET", "SL_M", "STOPLOSS_MARKET"): return "SL-M"
         if u in ("LIMIT", "MARKET", "STOPLOSS", "SL-M"): return u
-        return ""  # unknown
+        return ""
 
+    # If snapshot lacks a clear type, infer from price/trigger values in it
+    def _infer_type_from_snapshot(s: dict) -> str:
+        for k in ("newordertype", "ordertype", "orderType", "OrderType"):
+            t = _snap_to_mo(s.get(k))
+            if t: return t
+        price_keys = ("newprice","orderprice","price","Price")
+        trig_keys  = ("newtriggerprice","triggerprice","triggerPrice","TrigPrice")
+        has_p = any(_pos(_num_f(s.get(k))) for k in price_keys)
+        has_t = any(_pos(_num_f(s.get(k))) for k in trig_keys)
+        if has_t and has_p:   return "STOPLOSS"
+        if has_t and not has_p: return "SL-M"
+        if has_p and not has_t: return "LIMIT"
+        return "MARKET"
+
+    # load client JSON by display name
     def _load_mo_client_json_by_name(name: str) -> Dict[str, Any] | None:
         needle = (name or "").strip().lower()
         try:
@@ -693,6 +713,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             pass
         return None
 
+    # fetch live order snapshot so we can read token/type when NO_CHANGE
     def _fetch_order_snapshot(sdk, clientcode: str, uniqueorderid: str) -> dict | None:
         try:
             ts = datetime.now().strftime("%d-%b-%Y 09:00:00")
@@ -704,7 +725,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             pass
         return None
 
-    # min-qty map for lots conversion
+    # Build min-qty map once (Security ID / token → Min Qty)
     min_qty_map: Dict[str, int] = {}
     try:
         if os.path.exists(SQLITE_DB):
@@ -713,17 +734,26 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             cur.execute('SELECT [Security ID], [Min Qty] FROM symbols')
             for sid, q in cur.fetchall():
                 if sid:
-                    try: min_qty_map[str(sid)] = int(q) if q else 1
-                    except Exception: min_qty_map[str(sid)] = 1
+                    try:
+                        min_qty_map[str(sid)] = int(q) if q else 1
+                    except Exception:
+                        min_qty_map[str(sid)] = 1
             conn.close()
         else:
             print(f"[MO][MODIFY] WARNING: SQLITE_DB not found at {SQLITE_DB}", flush=True)
     except Exception as e:
         print(f"[MO][MODIFY] min-qty DB read error: {e}", flush=True)
 
-    # ---- process each order ----
+    # --------- process each order ---------
     for row in (orders or []):
         try:
+            # Debug IN row
+            try:
+                print("\n---- [MO][MODIFY] ROW (router) ----", flush=True)
+                print(json.dumps(row, indent=2, default=str), flush=True)
+            except Exception:
+                pass
+
             name = (row.get("name") or "").strip() or "<unknown>"
             oid  = str(row.get("order_id") or row.get("orderId") or "").strip()
             if not oid:
@@ -743,35 +773,37 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
 
             price_in = row.get("price")
             trig_in  = row.get("triggerPrice", row.get("triggerprice"))
-            qty_shares_in = _num_i(row.get("quantity"))
+            qty_shares_in = _num_i(row.get("quantity"))   # router sends SHARES
 
             snap = _fetch_order_snapshot(sdk, uid, oid) or {}
-            token    = str(snap.get("symboltoken") or snap.get("scripcode") or snap.get("token") or "")
-            min_qty  = max(1, int(min_qty_map.get(token, 1))) if token else 1
-            shares   = qty_shares_in if _pos(qty_shares_in) else _num_i(snap.get("orderqty"), 0)
-            lots     = int(shares // min_qty) if _pos(shares) else 0
+            token   = str(snap.get("symboltoken") or snap.get("scripcode") or snap.get("token") or "")
+            min_qty = max(1, int(min_qty_map.get(token, 1))) if token else 1
+
+            shares = qty_shares_in if _pos(qty_shares_in) else _num_i(snap.get("orderqty"), 0)
+            lots   = int(shares // min_qty) if _pos(shares) else 0
             if lots <= 0:
-                messages.append(f"❌ {name} ({oid}): cannot determine quantity in LOTS (shares={shares}, token={token}, min_qty={min_qty})")
+                messages.append(f"❌ {name} ({oid}): cannot determine quantity in LOTS "
+                                f"(shares={shares}, token={token}, min_qty={min_qty})")
                 continue
 
-            # >>> NEW: decide order type and ALWAYS include in payload
-            ui_type = _ui_to_mo(row.get("orderType"))
-            if not ui_type:  # NO_CHANGE -> use snapshot's current type
-                ui_type = _snap_to_mo(snap.get("ordertype") or snap.get("newordertype"))
+            # Decide order type and ALWAYS include it
+            ui_type = _ui_to_mo(row.get("orderType"))            # from UI radios
+            if not ui_type:                                      # NO_CHANGE -> use snapshot
+                ui_type = _infer_type_from_snapshot(snap)
 
             payload = {
                 "clientcode": uid,
                 "uniqueorderid": oid,
-                "newordertype": ui_type or "MARKET",  # ensure MO gets something valid
+                "newordertype": ui_type or "MARKET",             # always present
                 "neworderduration": str(row.get("validity") or "DAY").upper(),
                 "newdisclosedquantity": 0,
                 "lastmodifiedtime": datetime.now().strftime("%d-%b-%Y %H:%M:%S"),
-                "newquantityinlot": lots,
+                "newquantityinlot": lots,                        # MO expects LOTS
             }
             if _pos(_num_f(price_in)): payload["newprice"] = float(price_in)
             if _pos(_num_f(trig_in)):  payload["newtriggerprice"] = float(trig_in)
 
-            # Type-specific guards (only when that type requires fields)
+            # Type-specific validations
             if payload["newordertype"] == "LIMIT" and "newprice" not in payload:
                 messages.append(f"❌ {name} ({oid}): LIMIT requires Price > 0")
                 continue
@@ -782,7 +814,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 messages.append(f"❌ {name} ({oid}): SL-M requires Trigger > 0")
                 continue
 
-            # logs
+            # Debug OUT payload
             try:
                 print("---- [MO][MODIFY] OUT (payload) ----", flush=True)
                 print(json.dumps(payload, indent=2, default=str), flush=True)
@@ -790,8 +822,17 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             except Exception:
                 pass
 
+            # Call API
             resp = sdk.ModifyOrder(payload)
 
+            # Debug RESP
+            try:
+                print("---- [MO][MODIFY] RESP (raw) ----", flush=True)
+                print(json.dumps(resp if isinstance(resp, dict) else {"raw": resp}, indent=2, default=str), flush=True)
+            except Exception:
+                pass
+
+            # Normalize result for UI
             ok, msg = False, ""
             if isinstance(resp, dict):
                 status = str(resp.get("Status") or resp.get("status") or "").lower()
@@ -808,6 +849,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
