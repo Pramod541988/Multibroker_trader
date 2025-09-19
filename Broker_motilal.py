@@ -1,6 +1,5 @@
 import os, json, logging
 from typing import Dict, Any, List
-from datetime import datetime
 from collections import OrderedDict
 import threading
 from datetime import datetime, timedelta, timezone
@@ -630,15 +629,14 @@ def place_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Motilal ModifyOrder (robust):
-      • Always includes `newordertype`.
-      • If UI selects NO_CHANGE, derive type from the live order snapshot.
-      • Router sends quantity in SHARES; convert to LOTS via min-qty from SQLite symbols.db.
-      • Validates required fields per type (LIMIT / STOPLOSS / SL-M).
-      • Prints IN row, OUT payload, RESP for easy Railway log debugging.
+    Motilal ModifyOrder (order-details aware):
+      • Prefer GetOrderDetails to fetch symboltoken, orderqty, and *exact* last-modified time.
+      • Fall back to GetOrderBook if details missing.
+      • If UI = NO_CHANGE, derive type from snapshot so STOPLOSS/SL-M don't become MARKET.
+      • Convert SHARES -> LOTS using min-qty in SQLite symbols.db.
+      • Always include newordertype and lastmodifiedtime per MO requirement.
     """
     import json, os, sqlite3
-    from datetime import datetime
 
     messages: List[str] = []
 
@@ -665,7 +663,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         except Exception:
             return False
 
-    # Map UI radio to MO enum
+    # UI radio -> MO enum
     def _ui_to_mo(ot: str | None) -> str:
         u = (ot or "").strip().upper().replace("-", "_").replace(" ", "_")
         m = {
@@ -673,15 +671,15 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             "MARKET": "MARKET",
             "STOP_LOSS": "STOPLOSS",
             "STOPLOSS": "STOPLOSS",
-            "SL_LIMIT": "STOPLOSS",           # SL-L
+            "SL_LIMIT": "STOPLOSS",
             "SL": "STOPLOSS",
             "STOP_LOSS_MARKET": "SL-M",
             "STOPLOSS_MARKET": "SL-M",
-            "SL_MARKET": "SL-M",              # SL-M
+            "SL_MARKET": "SL-M",
         }
-        return m.get(u, "")  # "" → NO_CHANGE / unknown
+        return m.get(u, "")  # "" => NO_CHANGE/unknown
 
-    # Normalize strings coming from snapshot to MO enum
+    # snapshot string -> MO enum
     def _snap_to_mo(ot: str | None) -> str:
         u = (ot or "").strip().upper().replace("-", "_").replace(" ", "_")
         if u in ("SL_LIMIT", "SL_L", "STOPLOSS_LIMIT"): return "STOPLOSS"
@@ -689,9 +687,9 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if u in ("LIMIT", "MARKET", "STOPLOSS", "SL-M"): return u
         return ""
 
-    # If snapshot lacks a clear type, infer from price/trigger values in it
+    # infer type if snapshot lacks a clean enum
     def _infer_type_from_snapshot(s: dict) -> str:
-        for k in ("newordertype", "ordertype", "orderType", "OrderType"):
+        for k in ("newordertype","ordertype","orderType","OrderType"):
             t = _snap_to_mo(s.get(k))
             if t: return t
         price_keys = ("newprice","orderprice","price","Price")
@@ -704,7 +702,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         return "MARKET"
 
     # load client JSON by display name
-    def _load_mo_client_json_by_name(name: str) -> Dict[str, Any] | None:
+    def _load_client(name: str) -> Dict[str, Any] | None:
         needle = (name or "").strip().lower()
         try:
             for fn in os.listdir(_MO_DIR):
@@ -718,19 +716,67 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             pass
         return None
 
-    # fetch live order snapshot so we can read token/type when NO_CHANGE
-    def _fetch_order_snapshot(sdk, clientcode: str, uniqueorderid: str) -> dict | None:
+    # ---- data sources for live order ----
+    def _fetch_order_details(sdk, uid: str, oid: str) -> dict | None:
+        """
+        Preferred: ask broker for a single order's details.
+        Expect fields like: symboltoken, orderqty, recordinsertime/lastmodifiedtime, etc.
+        """
         try:
-            ts = datetime.now().strftime("%d-%b-%Y 09:00:00")
-            ob = sdk.GetOrderBook({"clientcode": clientcode, "datetimestamp": ts})
-            for r in (ob.get("data") or []):
-                if str(r.get("uniqueorderid") or "") == str(uniqueorderid):
+            # if your SDK signature differs, adjust accordingly
+            resp = sdk.GetOrderDetails({"clientcode": uid, "uniqueorderid": oid})
+            if isinstance(resp, dict) and resp.get("status") == "SUCCESS":
+                data = resp.get("data")
+                # some SDKs return a dict, some a 1-element list
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def _fetch_order_book_row(sdk, uid: str, oid: str) -> dict | None:
+        try:
+            ts = now_ist_str().split(" ")[0] + " 09:00:00"   # "DD-MMM-YYYY 09:00:00"
+            ob = sdk.GetOrderBook({"clientcode": uid, "datetimestamp": ts})
+            rows = ob.get("data", []) if isinstance(ob, dict) else []
+            for r in rows or []:
+                if str(r.get("uniqueorderid") or "") == str(oid):
                     return r
         except Exception:
             pass
         return None
 
-    # Build min-qty map once (Security ID / token → Min Qty)
+    def _extract_last_mod(s: dict) -> str:
+        """
+        Broker requires the *exact* last modified time string.
+        Try many field names seen across their payloads.
+        """
+        for k in (
+            "lastmodifiedtime","lastmodifieddatetime","LastModifiedTime","LastModifiedDatetime",
+            "recordinsertime","recordinserttime","RecordInsertTime","modifydatetime","modificationtime"
+        ):
+            v = s.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return now_ist_str()
+
+    def _extract_token(s: dict) -> str:
+        for k in ("symboltoken","scripcode","token","SymbolToken","ScripCode"):
+            v = s.get(k)
+            if v not in (None, "", 0):
+                return str(v)
+        return ""
+
+    def _extract_orderqty(s: dict) -> int | None:
+        for k in ("orderqty","quantity","Quantity","OrderQty"):
+            q = _num_i(s.get(k))
+            if _pos(q):
+                return int(q)
+        return None
+
+    # Build min-qty map once
     min_qty_map: Dict[str, int] = {}
     try:
         if os.path.exists(SQLITE_DB):
@@ -739,10 +785,8 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             cur.execute('SELECT [Security ID], [Min Qty] FROM symbols')
             for sid, q in cur.fetchall():
                 if sid:
-                    try:
-                        min_qty_map[str(sid)] = int(q) if q else 1
-                    except Exception:
-                        min_qty_map[str(sid)] = 1
+                    try: min_qty_map[str(sid)] = int(q) if q else 1
+                    except Exception: min_qty_map[str(sid)] = 1
             conn.close()
         else:
             print(f"[MO][MODIFY] WARNING: SQLITE_DB not found at {SQLITE_DB}", flush=True)
@@ -765,7 +809,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
                 messages.append(f"ℹ️ {name}: skipped (missing order_id)")
                 continue
 
-            cj = _load_mo_client_json_by_name(name)
+            cj = _load_client(name)
             if not cj:
                 messages.append(f"❌ {name} ({oid}): client JSON not found")
                 continue
@@ -780,30 +824,35 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             trig_in  = row.get("triggerPrice", row.get("triggerprice"))
             qty_shares_in = _num_i(row.get("quantity"))   # router sends SHARES
 
-            snap = _fetch_order_snapshot(sdk, uid, oid) or {}
-            token   = str(snap.get("symboltoken") or snap.get("scripcode") or snap.get("token") or "")
-            min_qty = max(1, int(min_qty_map.get(token, 1))) if token else 1
+            # Prefer order details; fallback to order book
+            snap = _fetch_order_details(sdk, uid, oid)
+            if not snap:
+                snap = _fetch_order_book_row(sdk, uid, oid) or {}
 
-            shares = qty_shares_in if _pos(qty_shares_in) else _num_i(snap.get("orderqty"), 0)
-            lots   = int(shares // min_qty) if _pos(shares) else 0
+            token     = _extract_token(snap)
+            min_qty   = max(1, int(min_qty_map.get(token, 1))) if token else 1
+            shares    = qty_shares_in if _pos(qty_shares_in) else _extract_orderqty(snap) or 0
+            lots      = int(shares // min_qty) if _pos(shares) else 0
+            last_mod  = _extract_last_mod(snap)
+
             if lots <= 0:
                 messages.append(f"❌ {name} ({oid}): cannot determine quantity in LOTS "
                                 f"(shares={shares}, token={token}, min_qty={min_qty})")
                 continue
 
-            # Decide order type and ALWAYS include it
-            ui_type = _ui_to_mo(row.get("orderType"))            # from UI radios
-            if not ui_type:                                      # NO_CHANGE -> use snapshot
+            # Decide order type (always include)
+            ui_type = _ui_to_mo(row.get("orderType"))
+            if not ui_type:  # NO_CHANGE
                 ui_type = _infer_type_from_snapshot(snap)
 
             payload = {
                 "clientcode": uid,
                 "uniqueorderid": oid,
-                "newordertype": ui_type or "MARKET",             # always present
+                "newordertype": ui_type or "MARKET",
                 "neworderduration": str(row.get("validity") or "DAY").upper(),
                 "newdisclosedquantity": 0,
-                "lastmodifiedtime": now_ist_str(),
-                "newquantityinlot": lots,                        # MO expects LOTS
+                "lastmodifiedtime": last_mod,     # <-- echo broker's last modified time
+                "newquantityinlot": lots,         # MO expects LOTS
             }
             if _pos(_num_f(price_in)): payload["newprice"] = float(price_in)
             if _pos(_num_f(trig_in)):  payload["newtriggerprice"] = float(trig_in)
@@ -837,7 +886,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             except Exception:
                 pass
 
-            # Normalize result for UI
+            # Normalize result
             ok, msg = False, ""
             if isinstance(resp, dict):
                 status = str(resp.get("Status") or resp.get("status") or "").lower()
@@ -854,6 +903,7 @@ def modify_orders(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             messages.append(f"❌ {row.get('name','<unknown>')} ({row.get('order_id','?')}): {e}")
 
     return {"message": messages}
+
 
 
 
