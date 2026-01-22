@@ -222,7 +222,7 @@ def refresh_symbol_db_from_github() -> str:
     csv_path = os.path.join(os.path.dirname(SYMBOL_DB_PATH), "security_id.csv")
     with open(csv_path, "wb") as f:
         f.write(r.content)
-    df = pd.read_csv(csv_path)
+  df = pd.read_csv(csv_path, dtype=str).fillna("")
 
     with _symbol_db_lock:
         conn = sqlite3.connect(SYMBOL_DB_PATH)
@@ -2001,6 +2001,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
