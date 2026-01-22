@@ -214,20 +214,31 @@ def refresh_symbol_db_from_github() -> str:
     """
     Download CSV and rebuild SQLite table 'symbols'.
     Creates helpful indexes for fast LIKE queries.
+    Forces dtype=str to avoid 10666.0 float artifacts.
     """
     _ensure_dirs()
+
     # Download -> dataframe
     r = requests.get(SYMBOL_CSV_URL, timeout=30)
     r.raise_for_status()
+
     csv_path = os.path.join(os.path.dirname(SYMBOL_DB_PATH), "security_id.csv")
     with open(csv_path, "wb") as f:
         f.write(r.content)
-  df = pd.read_csv(csv_path, dtype=str).fillna("")
+
+    # IMPORTANT: keep all columns as strings (no float .0)
+    df = pd.read_csv(csv_path, dtype=str).fillna("")
+
+    # Optional: strip trailing ".0" if present in any ID columns
+    for col in ("Security ID", "Min qty", "Min Qty", "MIN QTY", "MIN_QTY"):
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
 
     with _symbol_db_lock:
         conn = sqlite3.connect(SYMBOL_DB_PATH)
         try:
             df.to_sql(SYMBOL_TABLE, conn, index=False, if_exists="replace")
+
             # indexes (ignore failures if columns already indexed / absent)
             try:
                 conn.execute(f'CREATE INDEX IF NOT EXISTS idx_sym_symbol ON {SYMBOL_TABLE} ("Stock Symbol");')
@@ -241,10 +252,13 @@ def refresh_symbol_db_from_github() -> str:
                 conn.execute(f'CREATE INDEX IF NOT EXISTS idx_sym_secid ON {SYMBOL_TABLE} ("Security ID");')
             except Exception:
                 pass
+
             conn.commit()
         finally:
             conn.close()
+
     return "success"
+
 
 def _symbol_db_exists() -> bool:
     return os.path.exists(SYMBOL_DB_PATH)
@@ -2053,6 +2067,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
