@@ -1427,94 +1427,68 @@ def route_place_orders(payload: Dict[str, Any] = Body(...)):
 
     data = payload or {}
 
- 
- # ------------------- robust symbol parsing (DROP-IN) -------------------
+    # ------------------- robust symbol parsing (DROP-IN) -------------------
+    def _norm_id(x) -> str:
+        if x is None:
+            return ""
+        s = str(x).strip()
+        if not s:
+            return ""
+        try:
+            return str(int(float(s)))
+        except Exception:
+            return s
 
-def _norm_id(x) -> str:
-    """
-    Normalize numeric ids coming from UI / pandas / sqlite:
-      35182.0  -> "35182"
-      "35182"  -> "35182"
-      ""/None  -> ""
-    If it's non-numeric (rare), returns original string.
-    """
-    if x is None:
-        return ""
-    s = str(x).strip()
-    if not s:
-        return ""
-    try:
-        # handles "10666.0", 10666.0, "10666"
-        return str(int(float(s)))
-    except Exception:
-        return s
+    raw_symbol = (data.get("symbol") or "").strip()
+    explicit_id  = (
+        data.get("symbolId") or data.get("symbol_id") or data.get("security_id")
+        or data.get("securityId") or data.get("secid") or data.get("id")
+    )
+    explicit_tok = (
+        data.get("symboltoken") or data.get("symbolToken")
+        or data.get("token") or data.get("symbol_token")
+    )
 
-raw_symbol = (data.get("symbol") or "").strip()  # e.g. "NSE|PNB EQ|110666|17000"
+    parts = [p.strip() for p in str(raw_symbol).split("|")] if raw_symbol else []
+    exchange_from_symbol = parts[0] if len(parts) > 0 else ""
+    stock_symbol         = parts[1] if len(parts) > 1 else ""
 
-# Explicit fields from UI (sometimes comes as symbolId/security_id/token)
-explicit_id  = (
-    data.get("symbolId") or data.get("symbol_id") or data.get("security_id")
-    or data.get("securityId") or data.get("secid") or data.get("id")
-)
-explicit_tok = (
-    data.get("symboltoken") or data.get("symbolToken")
-    or data.get("token") or data.get("symbol_token")
-)
+    security_id_raw = parts[2] if len(parts) > 2 else ""
+    symboltoken_raw = parts[3] if len(parts) > 3 else ""
 
-parts = [p.strip() for p in str(raw_symbol).split("|")] if raw_symbol else []
-exchange_from_symbol = parts[0] if len(parts) > 0 else ""
-stock_symbol         = parts[1] if len(parts) > 1 else ""
+    security_id = _norm_id(security_id_raw)
+    symboltoken = _norm_id(symboltoken_raw)
 
-# These may come as "10666.0" if upstream is float-ish
-security_id_raw = parts[2] if len(parts) > 2 else ""   # Dhan security id
-symboltoken_raw = parts[3] if len(parts) > 3 else ""   # Motilal symbol token
+    if not security_id and explicit_id is not None:
+        security_id = _norm_id(explicit_id)
+    if not symboltoken and explicit_tok is not None:
+        symboltoken = _norm_id(explicit_tok)
 
-# Normalize early
-security_id = _norm_id(security_id_raw)
-symboltoken = _norm_id(symboltoken_raw)
+    lookup_dhan = globals().get("_lookup_security_id_sqlite")
+    lookup_mo   = (
+        globals().get("_lookup_symboltoken_sqlite")
+        or globals().get("_lookup_motilal_token_sqlite")
+        or globals().get("_lookup_symboltoken_csv")
+    )
 
-# Fill from explicit fields if missing
-if not security_id and explicit_id is not None:
-    security_id = _norm_id(explicit_id)
+    exchange_val = (data.get("exchange") or exchange_from_symbol or "NSE").upper()
 
-if not symboltoken and explicit_tok is not None:
-    symboltoken = _norm_id(explicit_tok)
+    if not security_id and callable(lookup_dhan) and stock_symbol:
+        try:
+            found = lookup_dhan(exchange_val, stock_symbol)
+            security_id = _norm_id(found)
+        except Exception:
+            pass
 
-# Optional backfills from local masters (if wired)
-lookup_dhan = globals().get("_lookup_security_id_sqlite")
-lookup_mo   = (
-    globals().get("_lookup_symboltoken_sqlite")
-    or globals().get("_lookup_motilal_token_sqlite")
-    or globals().get("_lookup_symboltoken_csv")
-)
+    if not symboltoken and callable(lookup_mo) and stock_symbol:
+        try:
+            found = lookup_mo(exchange_val, stock_symbol)
+            symboltoken = _norm_id(found)
+        except Exception:
+            pass
+    # ------------------- end symbol parsing (DROP-IN) -------------------
 
-exchange_val = (data.get("exchange") or exchange_from_symbol or "NSE").upper()
-
-# Lookup security_id (Dhan) if still missing
-if not security_id and callable(lookup_dhan) and stock_symbol:
-    try:
-        found = lookup_dhan(exchange_val, stock_symbol)
-        security_id = _norm_id(found)
-    except Exception:
-        pass
-
-# Lookup symboltoken (Motilal) if still missing
-if not symboltoken and callable(lookup_mo) and stock_symbol:
-    try:
-        found = lookup_mo(exchange_val, stock_symbol)
-        symboltoken = _norm_id(found)
-    except Exception:
-        pass
-
-# (Optional) debug logs to verify formats
-try:
-    print(f"[router] symbol parse: raw_symbol='{raw_symbol}' exch='{exchange_val}' sym='{stock_symbol}' "
-          f"security_id='{security_id}' symboltoken='{symboltoken}' "
-          f"explicit_id='{_norm_id(explicit_id)}' explicit_tok='{_norm_id(explicit_tok)}'")
-except Exception:
-    pass
-
-# ------------------- end symbol parsing (DROP-IN) -------------------
+    # ... rest of your function continues here (still indented 4 spaces)
 
     # ------------------- common UI fields -------------------
     groupacc        = bool(data.get("groupacc", False))
@@ -2067,6 +2041,7 @@ def route_modify_order(payload: Dict[str, Any] = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("MultiBroker_Router:app", host="127.0.0.1", port=5001, reload=False)
+
 
 
 
